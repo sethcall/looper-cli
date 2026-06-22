@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# looper-cli pre-commit gate. Enable with: just setup  (sets core.hooksPath=.githooks)
+# Runs the same checks as `just check`, but only when Rust sources / manifests are staged
+# (so docs-only commits aren't blocked). Skips gracefully if cargo isn't installed.
+set -euo pipefail
+
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|\.toml$|^rust-toolchain\.toml$'; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not found — skipping looper-cli gates (run 'just setup')."
+  exit 0
+fi
+
+echo "pre-commit: running looper-cli gates…"
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace

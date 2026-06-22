@@ -1,0 +1,38 @@
+[package]
+name = "looper-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Looper engine CLI: scan and index AI-generated docs from the terminal (no GUI, no LLM)."
+
+[[bin]]
+name = "looper-cli"
+path = "src/main.rs"
+
+[dependencies]
+# The composition root: inject the concrete OKF KB; sync + enrichment are no-ops in the CLI.
+looper-core = { workspace = true }
+looper-okf = { workspace = true }
+looper-sync = { workspace = true }
+looper-enrichment = { workspace = true }
+looper-workspace = { workspace = true }
+looper-ipc = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tempfile = { workspace = true }
+# `--json` output (engine events + workspace config).
+serde_json = { workspace = true }
+# Activity-view TUI (re-exports crossterm for terminal input).
+ratatui = { workspace = true }
+# Interactive prompts for `workspace create`.
+inquire = { workspace = true }
+# Graceful Ctrl-C shutdown for `watch` (drain + join workers).
+ctrlc = { workspace = true }
+# Default store/kb locations (CLI-first config dir).
+looper-config = { workspace = true }
+# Only for naming the broadcast `RecvError`/`TryRecvError` variants when draining engine events.
+tokio = { workspace = true }
+
+[lints]
+workspace = true

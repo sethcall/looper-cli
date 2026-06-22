@@ -1,0 +1,14 @@
+[package]
+name = "looper-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared serde DTOs for the Rust<->TS IPC boundary; source for generated TS types."
+
+[dependencies]
+serde = { workspace = true }
+ts-rs = { workspace = true }
+
+[lints]
+workspace = true

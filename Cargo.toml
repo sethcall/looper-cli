@@ -1,0 +1,97 @@
+# looper-cli — Cargo workspace root (the Rust engine behind Looper).
+# Crate boundaries, dependency-direction rules, and conventions: see ./AGENTS.md.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Seth Call <sethcall@gmail.com>"]
+repository = "https://github.com/sethcall/looper-cli"
+
+# Centralized dependency versions. Crates opt in with `{ workspace = true }`.
+[workspace.dependencies]
+# --- internal crates (path deps; see AGENTS.md crate map) ---
+looper-config = { path = "crates/looper-config" }
+looper-observability = { path = "crates/looper-observability" }
+looper-state = { path = "crates/looper-state" }
+looper-ipc = { path = "crates/looper-ipc" }
+looper-watcher = { path = "crates/looper-watcher" }
+looper-git = { path = "crates/looper-git" }
+looper-workspace = { path = "crates/looper-workspace" }
+looper-scan = { path = "crates/looper-scan" }
+looper-kb = { path = "crates/looper-kb" }
+looper-okf = { path = "crates/looper-okf" }
+looper-sync = { path = "crates/looper-sync" }
+looper-enrichment = { path = "crates/looper-enrichment" }
+looper-core = { path = "crates/looper-core" }
+
+# --- external: foundational ---
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# --- external: config ---
+figment = { version = "0.10", features = ["env", "json"] }
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+
+# --- external: observability ---
+tracing-appender = "0.2"
+
+# --- external: state ---
+tempfile = "3"
+
+# --- external: ipc (Rust->TS type generation) ---
+ts-rs = "12"
+
+# --- external: watcher + scan ---
+notify-debouncer-full = "0.7"
+ignore = "0.4"
+
+# --- external: git ---
+# `max-performance-safe` = pure-Rust SHA-1 + zlib (no cmake/system deps; clean installers).
+gix = { version = "0.84", default-features = false, features = ["sha1", "max-performance-safe"] }
+
+# --- external: workspace; `junction` is windows-only, declared per-crate ---
+dunce = "1"
+
+# --- external: scan ---
+blake3 = "1"
+
+# --- external: okf; serde_yaml is archived, _ng is the maintained fork ---
+serde_yaml_ng = "0.10"
+
+# --- external: okf viz renderer ---
+regex = "1"
+
+# --- external: core (async event bus) ---
+tokio = { version = "1", features = ["sync"] }
+
+# --- external: looper-cli binary (TUI; re-exports crossterm) ---
+ratatui = "0.29"
+
+# --- external: looper-cli binary (interactive `workspace create`) ---
+inquire = "0.7"
+
+# --- external: looper-cli binary (graceful shutdown for `watch`) ---
+# `termination` → the handler also catches SIGTERM/SIGHUP (so `systemctl stop` / `launchctl unload`
+# drain cleanly), not just SIGINT (Ctrl-C).
+ctrlc = { version = "3", features = ["termination"] }
+
+# Workspace-wide lints (CI / `just check` run clippy with `-D warnings`).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

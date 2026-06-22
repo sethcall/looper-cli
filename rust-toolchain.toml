@@ -1,0 +1,4 @@
+# Pin the toolchain channel + the components our gates need.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

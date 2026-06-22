@@ -1,0 +1,27 @@
+[package]
+name = "looper-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Workspace model + cross-platform .looper symlink/junction management + scan/watch exclusions."
+
+[dependencies]
+looper-state = { workspace = true }
+# Per-folder Auto Sync config is the shared ipc DTO, embedded on the workspace (item 30).
+looper-ipc = { workspace = true }
+# Git "true name" derivation for the GitTrueName link-naming policy (item 49).
+looper-git = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+dunce = { workspace = true }
+ignore = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

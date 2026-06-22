@@ -1,0 +1,14 @@
+[package]
+name = "looper-enrichment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The enrichment seam: the Enricher trait + error/result types + MockEnricher (pure Rust; no LLM)."
+
+[dependencies]
+looper-ipc = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "looper-okf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OKF knowledge-base producer: emit bundle markdown, okf_id, sidecar index."
+
+[dependencies]
+looper-kb = { workspace = true }
+looper-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+regex = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

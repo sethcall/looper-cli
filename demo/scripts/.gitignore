@@ -1,0 +1,6 @@
+# Rendered VHS output — regenerate with: vhs demo/scripts/looper-cli-demo.tape
+*.gif
+!looper-cli-demo.gif
+*.mp4
+*.webm
+*.ascii

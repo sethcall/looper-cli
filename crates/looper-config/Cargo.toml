@@ -1,0 +1,23 @@
+[package]
+name = "looper-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Layered configuration (defaults -> JSON file -> env -> CLI) and platform-dir resolution."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+figment = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+
+[dev-dependencies]
+# `figment::Jail` (used in precedence tests) is gated behind figment's `test` feature.
+figment = { workspace = true, features = ["test"] }
+# Temp dirs for the CLI-first/desktop-fallback config-file precedence tests.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+# Rust build output
+/target
+
+# Generated TS bindings (regenerated from looper-ipc; consumed by the desktop frontend)
+/bindings
+
+# OS / editor / logs
+.DS_Store
+*.log

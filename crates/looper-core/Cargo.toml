@@ -1,0 +1,28 @@
+[package]
+name = "looper-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Orchestration engine wiring watcher+scan+workspace+git+KB trait; never names a concrete KB."
+
+[dependencies]
+# Depends on the KB *trait* only — NEVER a concrete backend like `looper-okf`.
+looper-kb = { workspace = true }
+looper-ipc = { workspace = true }
+looper-scan = { workspace = true }
+looper-watcher = { workspace = true }
+looper-git = { workspace = true }
+looper-workspace = { workspace = true }
+# The Auto Sync seam (trait + DefaultSyncer); concrete backends inject in looper-app (item 30).
+looper-sync = { workspace = true }
+# The enrichment seam (trait + MockEnricher); the app injects the concrete OkfEnricher (item 41).
+looper-enrichment = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

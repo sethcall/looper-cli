@@ -1,0 +1,19 @@
+[package]
+name = "looper-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pluggable auto-sync backends (GitFileshare, Dolt) behind a swappable Syncer seam."
+
+[dependencies]
+looper-ipc = { workspace = true }
+# Read-only repo probe (is-a-repo / branch) via gix; mutations use the git CLI (item 30.04).
+looper-git = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

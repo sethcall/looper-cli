@@ -1,0 +1,16 @@
+[package]
+name = "looper-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Atomic JSON persistence of local app state with schema versioning/migration."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
