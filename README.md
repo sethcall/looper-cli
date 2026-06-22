@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sethcall/looper-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/sethcall/looper-cli/actions/workflows/ci.yml)
 
-The Rust engine behind **Looper** — auto-harvest markdown docs as you work,
+The Rust engine behind [**Looper**](https://runlooper.dev) — auto-harvest markdown docs as you work,
 index them into an [**Open Knowledge Format (OKF)** knowledge
 base](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing),
 watch files for changes, and build/update the index, all from the terminal. No GUI, no LLM
