@@ -12,6 +12,28 @@ dependency: pure Rust.
 
 <img alt="Looper CLI live OKF indexing demo" src="https://raw.githubusercontent.com/sethcall/looper-cli/main/demo/scripts/looper-cli-demo.gif" width="1200" />
 
+## Why OKF?
+
+OKF is extremely simple: markdown files, lightweight frontmatter, and normal links. That makes it a
+good bolt-on to however you already work. The data flow can start in your git repos, where docs are
+easy to review and version, then end up elsewhere as a read-only indexed knowledge base for browsing,
+search, sync, or agent consumption.
+
+That simple wiki adds value on its own because it gives people and tools a stable, readable map of a
+workspace without forcing a new authoring workflow. With additional tooling, Looper being one example,
+the same corpus also has a clear path to LLM enrichments: generate summaries, citations, cross-links,
+metadata, or other derived knowledge while keeping the human-authored sources intact.
+
+Looper's [`looper-okf`](./crates/looper-okf) crate is the native Rust implementation of the producer
+side of the [OKF repository's reference Python](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf):
+it emits OKF bundle markdown and maintains the sidecar index. It is producer-first, with a small
+Rust visualization renderer that reads a bundle to generate `viz.html`, not a general-purpose OKF
+consumer API.
+
+OKF was inspired by Andrej Karpathy's
+[LLM wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) ideas: keep knowledge
+in plain files that humans can read, agents can navigate, and tools can improve over time.
+
 ## What's here
 
 This is the project that houses the Rust code of all deterministic (non-AI) features of the
@@ -36,28 +58,6 @@ The workspace is split into focused crates:
 - Terminal binary and composition root: [`looper-cli`](./crates/looper-cli)
 
 See [`AGENTS.md`](./AGENTS.md) for the full crate map and dependency rules.
-
-## Why OKF?
-
-OKF is extremely simple: markdown files, lightweight frontmatter, and normal links. That makes it a
-good bolt-on to however you already work. The data flow can start in your git repos, where docs are
-easy to review and version, then end up elsewhere as a read-only indexed knowledge base for browsing,
-search, sync, or agent consumption.
-
-That simple wiki adds value on its own because it gives people and tools a stable, readable map of a
-workspace without forcing a new authoring workflow. With additional tooling, Looper being one example,
-the same corpus also has a clear path to LLM enrichments: generate summaries, citations, cross-links,
-metadata, or other derived knowledge while keeping the human-authored sources intact.
-
-Looper's [`looper-okf`](./crates/looper-okf) crate is the native Rust implementation of the producer
-side of the [OKF repository's reference Python](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf):
-it emits OKF bundle markdown and maintains the sidecar index. It is producer-first, with a small
-Rust visualization renderer that reads a bundle to generate `viz.html`, not a general-purpose OKF
-consumer API.
-
-OKF was inspired by Andrej Karpathy's
-[LLM wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) ideas: keep knowledge
-in plain files that humans can read, agents can navigate, and tools can improve over time.
 
 ## Quickstart
 
