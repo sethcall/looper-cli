@@ -58,6 +58,33 @@ pub struct SearchHit {
     pub labels: Vec<String>,
 }
 
+/// A lightweight catalog entry for one indexed document — the whole-KB listing a catalog consumer
+/// renders its file tree, tag filters, and heat map over. Cheaper than a search hit:
+/// no snippet/body, just identity + display metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocSummary {
+    /// The **source** file path (the UI's open key + tree path) — shown prominently to the user.
+    pub path: String,
+    /// The **knowledge-base output** path: the emitted bundle file this doc is indexed as. Callers
+    /// read this (augmented) version for content; backends that emit no per-doc artifact repeat
+    /// `path` here.
+    pub kb_path: String,
+    /// Display title (frontmatter `title:` → first `# H1` → filename), when known.
+    pub title: Option<String>,
+    /// Labels/tags from the **bundle** (KB output) frontmatter; empty when none.
+    pub labels: Vec<String>,
+}
+
+/// One tag and how many indexed documents carry it — for tag-filter UIs, sourced from the
+/// backend's tag → documents index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCount {
+    /// The tag (a frontmatter label).
+    pub tag: String,
+    /// Number of indexed documents carrying this tag.
+    pub count: u32,
+}
+
 /// A knowledge-base backend. Looper is the *producer*; implementations index source
 /// documents, support removal, and answer searches.
 pub trait Kb: Send + Sync {
@@ -106,6 +133,34 @@ pub trait Kb: Send + Sync {
     /// metadata + enrichment, unlike the raw source — or `None` if it isn't indexed (item 51).
     /// Defaults to `None` for backends that don't emit a per-doc artifact.
     fn read_indexed(&self, _source_path: &Path) -> Option<String> {
+        None
+    }
+
+    /// Every indexed document as a lightweight catalog entry (path + title + labels) — the
+    /// whole-KB listing callers browse/visualize. Defaults to
+    /// empty for backends that don't track it.
+    fn list_documents(&self) -> Vec<DocSummary> {
+        Vec::new()
+    }
+
+    /// Every tag in the KB with its document count, from the backend's persisted tag → documents
+    /// index — powers tag-filter UIs. Order is backend-defined.
+    /// Defaults to empty.
+    fn tag_counts(&self) -> Vec<TagCount> {
+        Vec::new()
+    }
+
+    /// Catalog entries for every indexed document carrying `tag` (the reverse tag lookup).
+    /// Defaults to empty.
+    fn documents_by_tag(&self, _tag: &str) -> Vec<DocSummary> {
+        Vec::new()
+    }
+
+    /// Re-sync the catalog (title + labels) for `source_path` from its **bundle output** on disk —
+    /// used after an external producer such as enrichment rewrites the bundle, so a catalog consumer reflects
+    /// the augmented KB output. Returns the refreshed concept ref, or `None` if the doc
+    /// isn't indexed / has no readable bundle. Defaults to `None`.
+    fn refresh_indexed(&self, _source_path: &Path) -> Option<ConceptRef> {
         None
     }
 }
@@ -205,6 +260,23 @@ impl Kb for MockKb {
 
     fn doc_count(&self) -> usize {
         lock(&self.inner).by_source.len()
+    }
+
+    fn list_documents(&self) -> Vec<DocSummary> {
+        let state = lock(&self.inner);
+        state
+            .by_source
+            .iter()
+            .map(|(path, e)| {
+                let p = path.to_string_lossy().into_owned();
+                DocSummary {
+                    kb_path: p.clone(),
+                    path: p,
+                    title: Some(derive_title(&e.content, &e.concept_id)),
+                    labels: Vec::new(),
+                }
+            })
+            .collect()
     }
 }
 

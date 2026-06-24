@@ -34,7 +34,7 @@ use looper_ipc::{
     KbBackend, RepoInfo, SyncDirection, SyncFolderConfig, SyncFolderState, SyncResolution,
     SyncStatus,
 };
-use looper_kb::{Kb, KbError, KbProvider, SearchHit, SourceDoc};
+use looper_kb::{DocSummary, Kb, KbError, KbProvider, SearchHit, SourceDoc, TagCount};
 use looper_scan::{Change, ChangeKind, ScanConfig, ScanEngine};
 use looper_sync::{SyncError, SyncOutcome, Syncer};
 use looper_watcher::{WatchConfig, WatchFilter, WatchMessage, Watcher, DEFAULT_DEBOUNCE};
@@ -358,6 +358,7 @@ impl Engine {
             .spawn({
                 let worker = EnrichWorker {
                     enricher: Arc::clone(&self.inner.enricher),
+                    kb: Arc::clone(&kb),
                     bus: self.inner.events.clone(),
                     wid: id.clone(),
                     kb_dir: kb_dir.clone(),
@@ -440,6 +441,24 @@ impl Engine {
         lock(&self.inner.workspaces)
             .get(workspace_id)
             .map_or_else(Vec::new, |handle| handle.kb.source_paths())
+    }
+
+    /// Every indexed document in a workspace as a lightweight catalog entry (path + title +
+    /// labels) — a whole-KB catalog listing. Empty if the workspace isn't open.
+    #[must_use]
+    pub fn list_documents(&self, workspace_id: &str) -> Vec<DocSummary> {
+        lock(&self.inner.workspaces)
+            .get(workspace_id)
+            .map_or_else(Vec::new, |handle| handle.kb.list_documents())
+    }
+
+    /// Every tag in a workspace's KB with its document count, from the persisted tag → documents
+    /// index (for tag-filter UIs). Empty if the workspace isn't open.
+    #[must_use]
+    pub fn tag_counts(&self, workspace_id: &str) -> Vec<TagCount> {
+        lock(&self.inner.workspaces)
+            .get(workspace_id)
+            .map_or_else(Vec::new, |handle| handle.kb.tag_counts())
     }
 
     /// Read the indexed (bundle) markdown for a source document in an open workspace — producer
@@ -1554,6 +1573,9 @@ fn now_stamp() -> String {
 /// Everything the enrichment thread needs (bundled to keep `run_enrich_workspace` to one arg).
 struct EnrichWorker {
     enricher: Arc<dyn Enricher>,
+    /// The workspace KB, so a finished enrichment can re-sync the catalog from the rewritten
+    /// bundle (the catalog's tags reflect the KB output).
+    kb: Arc<dyn Kb>,
     bus: broadcast::Sender<EngineEvent>,
     wid: String,
     kb_dir: PathBuf,
@@ -1596,14 +1618,19 @@ fn enrich_one(w: &EnrichWorker, concept_id: &str, path: &str) {
         },
     );
     match w.enricher.enrich(&w.kb_dir, concept_id, source, &w.wid) {
-        Ok(delta) => emit(
-            &w.bus,
-            EngineEvent::EnrichSucceeded {
-                workspace_id: w.wid.clone(),
-                path: path.to_string(),
-                delta,
-            },
-        ),
+        Ok(delta) => {
+            // The enricher rewrote the bundle (KB output) with new tags/content; re-sync the
+            // catalog from it so the catalog's tags reflect the output before the UI reacts.
+            w.kb.refresh_indexed(Path::new(path));
+            emit(
+                &w.bus,
+                EngineEvent::EnrichSucceeded {
+                    workspace_id: w.wid.clone(),
+                    path: path.to_string(),
+                    delta,
+                },
+            );
+        }
         Err(err) => emit_enrich_failed(w, path, err.to_string()),
     }
 }
@@ -1632,6 +1659,8 @@ fn enrich_all_now(w: &EnrichWorker) {
     let enriched = match w.enricher.enrich_all(&w.kb_dir, source, &w.wid) {
         Ok(changed) => {
             for doc in &changed {
+                // Re-sync each rewritten bundle into the catalog before announcing it.
+                w.kb.refresh_indexed(Path::new(&doc.source_path));
                 emit(
                     &w.bus,
                     EngineEvent::EnrichSucceeded {

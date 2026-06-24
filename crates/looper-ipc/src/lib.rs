@@ -305,6 +305,35 @@ pub struct SearchHit {
     pub labels: Vec<String>,
 }
 
+// ---- Catalog + tag index -------------------------------------------------------
+
+/// A lightweight catalog entry for one indexed document — a whole-KB listing (path + title +
+/// labels) for browsing or visualizing the corpus (file trees, tag filters, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct DocSummary {
+    /// The **source** file path (the UI's open key + tree path) — shown prominently to the user.
+    pub path: String,
+    /// The **knowledge-base output** path: the emitted bundle file this doc is indexed as.
+    /// Consumers read this (augmented) version for content.
+    pub kb_path: String,
+    /// Display title (frontmatter `title:` → first `# H1` → filename), when known.
+    pub title: Option<String>,
+    /// Labels/tags from the **bundle** (KB output) frontmatter; empty when none.
+    pub labels: Vec<String>,
+}
+
+/// One tag and how many indexed documents carry it — for tag-filter UIs, from the KB's persisted
+/// tag → documents index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct TagCount {
+    /// The tag (a frontmatter label).
+    pub tag: String,
+    /// Number of indexed documents carrying this tag.
+    pub count: u32,
+}
+
 // ---- Enrichment (plan item 41) ------------------------------------------------------
 
 /// Where the Gemini API key comes from for a workspace's enrichment.

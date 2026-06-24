@@ -15,6 +15,7 @@ pub mod gitignore;
 pub mod link;
 pub mod linking;
 
+use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -147,13 +148,61 @@ pub fn discover_folder_candidates(
     }
 
     candidates.sort_by(|a, b| {
-        b.is_git_repo
-            .cmp(&a.is_git_repo)
-            .then_with(|| b.has_markdown.cmp(&a.has_markdown))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.path.cmp(&b.path))
+        alphanumeric_cmp(&a.name, &b.name).then_with(|| alphanumeric_cmp(&a.path, &b.path))
     });
     Ok(candidates)
+}
+
+fn alphanumeric_cmp(a: &str, b: &str) -> Ordering {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let mut a_index = 0;
+    let mut b_index = 0;
+
+    while a_index < a_bytes.len() && b_index < b_bytes.len() {
+        let a_byte = a_bytes[a_index];
+        let b_byte = b_bytes[b_index];
+
+        if a_byte.is_ascii_digit() && b_byte.is_ascii_digit() {
+            let a_start = a_index;
+            let b_start = b_index;
+            while a_index < a_bytes.len() && a_bytes[a_index].is_ascii_digit() {
+                a_index += 1;
+            }
+            while b_index < b_bytes.len() && b_bytes[b_index].is_ascii_digit() {
+                b_index += 1;
+            }
+
+            let a_digits = &a[a_start..a_index];
+            let b_digits = &b[b_start..b_index];
+            let a_number = a_digits.trim_start_matches('0');
+            let b_number = b_digits.trim_start_matches('0');
+            let a_number = if a_number.is_empty() { "0" } else { a_number };
+            let b_number = if b_number.is_empty() { "0" } else { b_number };
+
+            let ord = a_number
+                .len()
+                .cmp(&b_number.len())
+                .then_with(|| a_number.cmp(b_number))
+                .then_with(|| a_digits.len().cmp(&b_digits.len()));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            continue;
+        }
+
+        let ord = a_byte
+            .to_ascii_lowercase()
+            .cmp(&b_byte.to_ascii_lowercase());
+        if ord != Ordering::Equal {
+            return ord;
+        }
+
+        a_index += 1;
+        b_index += 1;
+    }
+
+    a_bytes.len().cmp(&b_bytes.len())
 }
 
 fn is_pruned_candidate(name: &OsStr) -> bool {
@@ -484,8 +533,8 @@ mod tests {
         let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["repo", "docs", "plain"],
-            "git repos sort first, target is pruned, nested repos are not surfaced"
+            vec!["docs", "plain", "repo"],
+            "candidate folders sort alphabetically, target is pruned, nested repos are not surfaced"
         );
 
         let repo = candidates.iter().find(|c| c.name == "repo").unwrap();
@@ -501,6 +550,23 @@ mod tests {
         assert!(
             plain.has_markdown,
             "markdown probe sees shallow nested docs"
+        );
+    }
+
+    #[test]
+    fn discovery_sorts_candidates_alphanumerically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        for name in ["repo-10", "repo-2", "repo-1", "Repo-03", "alpha"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+
+        let candidates = discover_folder_candidates(root).unwrap();
+        let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "repo-1", "repo-2", "Repo-03", "repo-10"]
         );
     }
 

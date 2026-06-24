@@ -19,11 +19,11 @@ mod error;
 mod frontmatter;
 mod viz;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use looper_kb::{ConceptRef, Kb, KbError, KbProvider, SearchHit, SourceDoc};
+use looper_kb::{ConceptRef, DocSummary, Kb, KbError, KbProvider, SearchHit, SourceDoc, TagCount};
 use looper_state::{Store, Versioned};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
@@ -45,6 +45,11 @@ struct Inner {
     /// open, kept in sync on index/remove. This is the "search index we maintain" — OKF
     /// itself keeps none (its `viz.html` does ad-hoc client-side substring matching).
     search: BTreeMap<String, SearchEntry>,
+    /// Reverse tag index: tag -> the source paths carrying it. Built from the persisted
+    /// `index.entries` (whose `labels` survive restarts) on open, and updated incrementally on
+    /// index/remove/clear. Powers `tag_counts` + `documents_by_tag` (a catalog consumer)
+    /// without rescanning the catalog.
+    tags: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
 /// A concept's searchable fields. `haystack` is lowercased `title + concept_id + tags +
@@ -77,6 +82,15 @@ struct IndexEntry {
     okf_id: String,
     concept_id: String,
     content_hash: String,
+    /// Display title, mirroring the **bundle** (KB output) — refreshed from it on open and on
+    /// enrichment, and persisted so the catalog is available immediately. `#[serde(default)]`
+    /// (→ `None`) keeps sidecars written before this field was added loadable.
+    #[serde(default)]
+    title: Option<String>,
+    /// Frontmatter tags from the **bundle** (so enrichment-added tags are included), kept in sync
+    /// alongside `title`. `#[serde(default)]` (→ empty) keeps older sidecars loadable.
+    #[serde(default)]
+    labels: Vec<String>,
 }
 
 impl OkfKb {
@@ -95,14 +109,36 @@ impl OkfKb {
             source,
         })?;
         let store = Store::new(index_path);
-        let index = store.load()?;
+        let mut index = store.load()?;
         let search = build_search_index(&bundle_dir, &index);
+        // The OKF bundle is the knowledge-base **output** and the source of truth for the catalog:
+        // it carries enrichment-added tags (and any later augmentation) the original source
+        // frontmatter lacks. Refresh each entry's cached title/labels from its freshly-parsed
+        // bundle so `list_documents` / `tag_counts` reflect the current KB output. When a
+        // bundle is missing/unreadable, keep the persisted values so the catalog still survives.
+        let mut dirty = false;
+        for entry in index.entries.values_mut() {
+            if let Some(found) = search.get(&entry.concept_id) {
+                if entry.title.as_deref() != Some(found.title.as_str())
+                    || entry.labels != found.labels
+                {
+                    entry.title = Some(found.title.clone());
+                    entry.labels = found.labels.clone();
+                    dirty = true;
+                }
+            }
+        }
+        if dirty {
+            store.save(&index)?;
+        }
+        let tags = build_tag_index(&index);
         Ok(Self {
             bundle_dir,
             inner: Mutex::new(Inner {
                 store,
                 index,
                 search,
+                tags,
             }),
         })
     }
@@ -121,7 +157,8 @@ impl OkfKb {
         let mut document = Document::parse(&doc.content);
         let content_hash = blake3::hash(doc.content.as_bytes()).to_hex().to_string();
 
-        let mut inner = lock(&self.inner);
+        let mut guard = lock(&self.inner);
+        let inner = &mut *guard;
 
         // okf_id: honor one already in the source frontmatter, else preserve the indexed
         // one for this source path, else mint a new one.
@@ -138,23 +175,45 @@ impl OkfKb {
 
         write_bundle(&self.concept_path(&doc.concept_id), &document)?;
 
+        let title = frontmatter_str(&document.frontmatter, "title")
+            .unwrap_or_else(|| looper_kb::derive_title(&document.body, &doc.concept_id));
+        let labels = frontmatter_tags(&document.frontmatter);
+
+        // Reverse tag index: drop this path from its previous tags (labels may have changed on a
+        // re-index), then add its current tags below.
+        let prev_labels = inner
+            .index
+            .entries
+            .get(&doc.source_path)
+            .map(|e| e.labels.clone());
+        if let Some(prev_labels) = prev_labels {
+            for label in prev_labels {
+                untag(&mut inner.tags, &label, &doc.source_path);
+            }
+        }
+
         inner.index.entries.insert(
             doc.source_path.clone(),
             IndexEntry {
                 okf_id: okf_id.clone(),
                 concept_id: doc.concept_id.clone(),
                 content_hash,
+                title: Some(title.clone()),
+                labels: labels.clone(),
             },
         );
         inner.search.insert(
             doc.concept_id.clone(),
             search_entry(&doc.concept_id, &document.frontmatter, &document.body),
         );
+        for label in &labels {
+            inner
+                .tags
+                .entry(label.clone())
+                .or_default()
+                .insert(doc.source_path.clone());
+        }
         inner.store.save(&inner.index)?;
-
-        let title = frontmatter_str(&document.frontmatter, "title")
-            .unwrap_or_else(|| looper_kb::derive_title(&document.body, &doc.concept_id));
-        let labels = frontmatter_tags(&document.frontmatter);
 
         Ok(ConceptRef {
             okf_id,
@@ -165,10 +224,14 @@ impl OkfKb {
     }
 
     fn remove_impl(&self, source_path: &Path) -> Result<(), OkfError> {
-        let mut inner = lock(&self.inner);
+        let mut guard = lock(&self.inner);
+        let inner = &mut *guard;
         if let Some(entry) = inner.index.entries.remove(source_path) {
             let _ = std::fs::remove_file(self.concept_path(&entry.concept_id));
             inner.search.remove(&entry.concept_id);
+            for label in &entry.labels {
+                untag(&mut inner.tags, label, source_path);
+            }
             inner.store.save(&inner.index)?;
         }
         Ok(())
@@ -187,8 +250,96 @@ impl OkfKb {
         }
         inner.index.entries.clear();
         inner.search.clear();
+        inner.tags.clear();
         inner.store.save(&inner.index)?;
         Ok(())
+    }
+
+    fn list_documents_impl(&self) -> Vec<DocSummary> {
+        let inner = lock(&self.inner);
+        inner
+            .index
+            .entries
+            .iter()
+            .map(|(path, entry)| doc_summary(path, &self.concept_path(&entry.concept_id), entry))
+            .collect()
+    }
+
+    fn tag_counts_impl(&self) -> Vec<TagCount> {
+        let inner = lock(&self.inner);
+        let mut counts: Vec<TagCount> = inner
+            .tags
+            .iter()
+            .map(|(tag, paths)| TagCount {
+                tag: tag.clone(),
+                count: paths.len() as u32,
+            })
+            .collect();
+        // Most-used first; ties broken by tag name for a stable, deterministic order.
+        counts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
+        counts
+    }
+
+    fn documents_by_tag_impl(&self, tag: &str) -> Vec<DocSummary> {
+        let inner = lock(&self.inner);
+        match inner.tags.get(tag) {
+            Some(paths) => paths
+                .iter()
+                .filter_map(|path| {
+                    inner.index.entries.get(path).map(|entry| {
+                        doc_summary(path, &self.concept_path(&entry.concept_id), entry)
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Re-sync the catalog for `source_path` from its bundle on disk (the KB output) — used after an
+    /// external producer such as enrichment rewrites the bundle, so a catalog consumer's title/tags reflect
+    /// the augmented output. Updates the cached entry, the search index, and the reverse
+    /// tag index, then persists. Returns the refreshed concept ref, or `None` if the doc isn't
+    /// indexed or its bundle can't be read.
+    fn refresh_indexed_impl(&self, source_path: &Path) -> Option<ConceptRef> {
+        let mut guard = lock(&self.inner);
+        let inner = &mut *guard;
+        let (concept_id, okf_id, prev_labels) = inner
+            .index
+            .entries
+            .get(source_path)
+            .map(|e| (e.concept_id.clone(), e.okf_id.clone(), e.labels.clone()))?;
+        let bundle = std::fs::read_to_string(self.concept_path(&concept_id)).ok()?;
+        let document = Document::parse(&bundle);
+        let title = frontmatter_str(&document.frontmatter, "title")
+            .unwrap_or_else(|| looper_kb::derive_title(&document.body, &concept_id));
+        let labels = frontmatter_tags(&document.frontmatter);
+
+        for label in prev_labels {
+            untag(&mut inner.tags, &label, source_path);
+        }
+        if let Some(entry) = inner.index.entries.get_mut(source_path) {
+            entry.title = Some(title.clone());
+            entry.labels = labels.clone();
+        }
+        for label in &labels {
+            inner
+                .tags
+                .entry(label.clone())
+                .or_default()
+                .insert(source_path.to_path_buf());
+        }
+        inner.search.insert(
+            concept_id.clone(),
+            search_entry(&concept_id, &document.frontmatter, &document.body),
+        );
+        let _ = inner.store.save(&inner.index);
+
+        Some(ConceptRef {
+            okf_id,
+            concept_id,
+            title,
+            labels,
+        })
     }
 
     fn search_impl(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, OkfError> {
@@ -254,6 +405,22 @@ impl Kb for OkfKb {
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, KbError> {
         self.search_impl(query, limit).map_err(into_kb_error)
+    }
+
+    fn list_documents(&self) -> Vec<DocSummary> {
+        self.list_documents_impl()
+    }
+
+    fn tag_counts(&self) -> Vec<TagCount> {
+        self.tag_counts_impl()
+    }
+
+    fn documents_by_tag(&self, tag: &str) -> Vec<DocSummary> {
+        self.documents_by_tag_impl(tag)
+    }
+
+    fn refresh_indexed(&self, source_path: &Path) -> Option<ConceptRef> {
+        self.refresh_indexed_impl(source_path)
     }
 }
 
@@ -359,6 +526,40 @@ fn build_search_index(bundle_dir: &Path, index: &OkfIndex) -> BTreeMap<String, S
         }
     }
     search
+}
+
+/// Build a catalog entry from a sidecar index entry, its source path, and its bundle (KB output)
+/// path. Callers surface the source path but keep the KB path so they can read the augmented
+/// bundle for content.
+fn doc_summary(source_path: &Path, kb_path: &Path, entry: &IndexEntry) -> DocSummary {
+    DocSummary {
+        path: source_path.display().to_string(),
+        kb_path: kb_path.display().to_string(),
+        title: entry.title.clone(),
+        labels: entry.labels.clone(),
+    }
+}
+
+/// Drop `path` from `tag`'s set in the reverse index, removing the tag entirely when it empties.
+fn untag(tags: &mut BTreeMap<String, BTreeSet<PathBuf>>, tag: &str, path: &Path) {
+    if let Some(set) = tags.get_mut(tag) {
+        set.remove(path);
+        if set.is_empty() {
+            tags.remove(tag);
+        }
+    }
+}
+
+/// Build the reverse tag index (tag -> source paths) from the persisted sidecar entries. Their
+/// `labels` survive restarts, so this needs no bundle parsing.
+fn build_tag_index(index: &OkfIndex) -> BTreeMap<String, BTreeSet<PathBuf>> {
+    let mut tags: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
+    for (path, entry) in &index.entries {
+        for label in &entry.labels {
+            tags.entry(label.clone()).or_default().insert(path.clone());
+        }
+    }
+    tags
 }
 
 fn into_kb_error(err: OkfError) -> KbError {
@@ -512,5 +713,161 @@ mod tests {
         assert_eq!(by_body[0].concept_id, "notes/x");
         // Title/id are searchable too.
         assert_eq!(kb.search("notes/x", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tag_counts_and_documents_by_tag_track_index_and_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kb = OkfKb::open(tmp.path().join("b"), tmp.path().join("i.json")).unwrap();
+        let src_a = tmp.path().join("a.md");
+        let src_b = tmp.path().join("b.md");
+        kb.index(&doc(&src_a, "a", "---\ntags: [api]\n---\n# A\n"))
+            .unwrap();
+        kb.index(&doc(&src_b, "b", "---\ntags: [api, infra]\n---\n# B\n"))
+            .unwrap();
+
+        // `api` on two docs, `infra` on one → most-used first.
+        let counts = kb.tag_counts();
+        assert_eq!(counts[0].tag, "api");
+        assert_eq!(counts[0].count, 2);
+        assert!(counts.iter().any(|c| c.tag == "infra" && c.count == 1));
+        assert_eq!(kb.documents_by_tag("infra").len(), 1);
+        assert_eq!(kb.documents_by_tag("api").len(), 2);
+
+        // Re-index a.md without its tag → `api` drops to one doc.
+        kb.index(&doc(&src_a, "a", "# A no tags\n")).unwrap();
+        assert!(kb
+            .tag_counts()
+            .iter()
+            .any(|c| c.tag == "api" && c.count == 1));
+
+        // Removing b.md drops `api` and `infra` entirely.
+        kb.remove(&src_b).unwrap();
+        assert!(kb
+            .tag_counts()
+            .iter()
+            .all(|c| c.tag != "api" && c.tag != "infra"));
+    }
+
+    #[test]
+    fn catalog_survives_when_the_bundle_output_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        let index = tmp.path().join("i.json");
+        let src = tmp.path().join("a.md");
+        {
+            let kb = OkfKb::open(&bundle, &index).unwrap();
+            kb.index(&doc(
+                &src,
+                "a",
+                "---\ntags: [Product, Roadmap]\n---\n# A\nbody\n",
+            ))
+            .unwrap();
+        }
+        // Delete the emitted bundle output: with nothing to refresh from, the persisted sidecar
+        // still answers catalog + tag queries (the catalog survives a missing output file).
+        std::fs::remove_dir_all(&bundle).unwrap();
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        let docs = kb.list_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].title.as_deref(), Some("A"));
+        assert_eq!(
+            docs[0].labels,
+            vec!["Product".to_string(), "Roadmap".to_string()]
+        );
+
+        let counts = kb.tag_counts();
+        assert_eq!(counts.len(), 2);
+        assert!(counts.iter().any(|c| c.tag == "Product" && c.count == 1));
+        assert_eq!(kb.documents_by_tag("Roadmap").len(), 1);
+    }
+
+    #[test]
+    fn reopen_reflects_tags_added_to_the_bundle_output() {
+        // Enrichment (or any producer) rewrites the bundle with extra tags after indexing. The
+        // bundle is the KB output and authoritative: a reopen must surface those tags even though
+        // the original source had none.
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        let index = tmp.path().join("i.json");
+        let src = tmp.path().join("a.md");
+        {
+            let kb = OkfKb::open(&bundle, &index).unwrap();
+            kb.index(&doc(&src, "a", "# A\nbody\n")).unwrap();
+            assert!(kb.tag_counts().is_empty());
+        }
+        std::fs::write(
+            bundle.join("a.md"),
+            "---\ntype: Document\ntitle: A\ntags:\n  - enriched\n---\n# A\nbody\n",
+        )
+        .unwrap();
+
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+        assert!(kb.tag_counts().iter().any(|c| c.tag == "enriched"));
+        assert_eq!(kb.list_documents()[0].labels, vec!["enriched".to_string()]);
+    }
+
+    #[test]
+    fn refresh_indexed_picks_up_enrichment_tags_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        let index = tmp.path().join("i.json");
+        let src = tmp.path().join("a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+        kb.index(&doc(&src, "a", "# A\nbody\n")).unwrap();
+        assert!(kb.tag_counts().is_empty());
+
+        // Simulate enrichment rewriting the bundle (the KB output) in place.
+        std::fs::write(
+            bundle.join("a.md"),
+            "---\ntype: Document\ntitle: A\ntags:\n  - enriched\n  - looper\n---\n# A\nbody\n",
+        )
+        .unwrap();
+
+        let cref = kb.refresh_indexed(&src).expect("doc is indexed");
+        assert_eq!(
+            cref.labels,
+            vec!["enriched".to_string(), "looper".to_string()]
+        );
+        assert!(kb
+            .tag_counts()
+            .iter()
+            .any(|c| c.tag == "enriched" && c.count == 1));
+        assert_eq!(kb.documents_by_tag("looper").len(), 1);
+        // The catalog's kb_path points at the bundle output file.
+        assert!(kb.list_documents()[0].kb_path.ends_with("a.md"));
+
+        // Not-indexed paths refresh to None.
+        assert!(kb.refresh_indexed(&tmp.path().join("nope.md")).is_none());
+    }
+
+    #[test]
+    fn old_sidecar_without_tags_is_backfilled_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        let index = tmp.path().join("i.json");
+        let src = tmp.path().join("a.md");
+        {
+            let kb = OkfKb::open(&bundle, &index).unwrap();
+            kb.index(&doc(&src, "a", "---\ntags: [api]\n---\n# A\n"))
+                .unwrap();
+        }
+        // Simulate a pre-item-67 sidecar: strip the persisted title/labels from the entry, as if
+        // it had been written before those fields existed. The bundle on disk still has the tags.
+        let raw = std::fs::read_to_string(&index).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entries = json["data"]["entries"].as_object_mut().unwrap();
+        for entry in entries.values_mut() {
+            let obj = entry.as_object_mut().unwrap();
+            obj.remove("title");
+            obj.remove("labels");
+        }
+        std::fs::write(&index, serde_json::to_string(&json).unwrap()).unwrap();
+
+        // Reopen: open() backfills title/labels from the bundle, so tag queries work again.
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+        assert_eq!(kb.documents_by_tag("api").len(), 1);
+        assert_eq!(kb.list_documents()[0].labels, vec!["api".to_string()]);
     }
 }
