@@ -405,6 +405,12 @@ impl Engine {
         }
     }
 
+    /// Whether `workspace_id` is currently open (its worker is running).
+    #[must_use]
+    pub fn is_open(&self, workspace_id: &str) -> bool {
+        lock(&self.inner.workspaces).contains_key(workspace_id)
+    }
+
     /// Search a specific open workspace's KB. Returns an empty result if that workspace is
     /// not currently open.
     ///
