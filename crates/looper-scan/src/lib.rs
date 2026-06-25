@@ -1,7 +1,8 @@
-//! `looper-scan` — markdown discovery, fingerprinting, and change detection.
+//! `looper-scan` — document discovery, fingerprinting, and change detection.
 //!
 //! Walks workspace roots (gitignore-aware, via the `ignore` crate), collects tracked
-//! markdown (`*.md`), and fingerprints each file (`blake3` hash + size + mtime). A
+//! documents (`*.md`, `*.adoc`, `*.asciidoc` by default), and fingerprints each file
+//! (`blake3` hash + size + mtime). A
 //! persisted [`Snapshot`] is the *cursor*: on startup [`ScanEngine::full_scan`] re-walks
 //! and [`diff`]s against the cursor to recover changes made while Looper was off
 //! (Created / Modified / Removed / Moved). Live watcher events are folded in one path at
@@ -29,7 +30,10 @@ const DOCS_DIR_NAMES: [&str; 4] = ["doc", "docs", "spec", "specs"];
 /// Directory names always pruned from the walk (in addition to gitignore).
 const PRUNED_DIR_NAMES: [&str; 3] = [".git", "node_modules", "target"];
 
-/// A content + metadata fingerprint of a markdown file.
+/// File extensions tracked by default, lowercase with no leading dot.
+const DEFAULT_TRACKED_EXTENSIONS: [&str; 3] = ["md", "adoc", "asciidoc"];
+
+/// A content + metadata fingerprint of a tracked document file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFingerprint {
     /// `blake3` content hash (hex).
@@ -53,7 +57,7 @@ pub enum ChangeKind {
     Moved,
 }
 
-/// A detected change to a tracked markdown file.
+/// A detected change to a tracked document file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     /// The (current) path of the file. For [`ChangeKind::Moved`] this is the new path.
@@ -66,7 +70,7 @@ pub struct Change {
     pub moved_from: Option<PathBuf>,
 }
 
-/// A snapshot of tracked markdown fingerprints — the persisted scan cursor.
+/// A snapshot of tracked document fingerprints — the persisted scan cursor.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Snapshot {
@@ -112,19 +116,24 @@ pub struct ScanConfig {
     /// Path prefixes to exclude (e.g. a workspace's KB dir and `.looper` links).
     pub excluded_prefixes: Vec<PathBuf>,
     /// File extensions to index, lowercase, no dot (e.g. `["md", "adoc"]`). Defaults to
-    /// `["md"]`; the engine sets it from the workspace's watched extensions (item 70).
+    /// Looper's built-in document formats; the engine sets it from the workspace's watched
+    /// extensions (item 70).
     pub extensions: Vec<String>,
 }
 
 impl ScanConfig {
-    /// A gitignore-respecting config for `roots` with no extra exclusions, watching `.md`.
+    /// A gitignore-respecting config for `roots` with no extra exclusions, watching Looper's
+    /// built-in document formats.
     #[must_use]
     pub fn new(roots: Vec<PathBuf>) -> Self {
         Self {
             roots,
             respect_gitignore: true,
             excluded_prefixes: Vec::new(),
-            extensions: vec!["md".to_string()],
+            extensions: DEFAULT_TRACKED_EXTENSIONS
+                .iter()
+                .map(|ext| (*ext).to_string())
+                .collect(),
         }
     }
 
@@ -223,7 +232,7 @@ pub fn walk_markdown_paths(config: &ScanConfig) -> Vec<PathBuf> {
     paths
 }
 
-/// Walk `config.roots` and fingerprint every tracked markdown file into a [`Snapshot`].
+/// Walk `config.roots` and fingerprint every tracked document file into a [`Snapshot`].
 #[must_use]
 pub fn scan_tracked_markdown(config: &ScanConfig) -> Snapshot {
     let mut files = BTreeMap::new();
@@ -552,25 +561,25 @@ mod tests {
         write(&root.join("b.adoc"), "b");
         write(&root.join("c.txt"), "c");
 
-        // Default config watches `.md` only — `.adoc` is not collected.
-        let md_only = ScanConfig::new(vec![root.to_path_buf()]);
+        // Default config watches Looper's built-in document formats.
+        let default_docs = ScanConfig::new(vec![root.to_path_buf()]);
+        let snap = scan_tracked_markdown(&default_docs);
+        assert!(snap.get(&root.join("a.md")).is_some());
+        assert!(snap.get(&root.join("b.adoc")).is_some());
+        assert_eq!(snap.len(), 2);
+
+        // Configuring a custom subset still gates what is collected.
+        let mut md_only = ScanConfig::new(vec![root.to_path_buf()]);
+        md_only.extensions = vec!["md".to_string()];
         let snap = scan_tracked_markdown(&md_only);
         assert!(snap.get(&root.join("a.md")).is_some());
         assert!(snap.get(&root.join("b.adoc")).is_none());
-        assert_eq!(snap.len(), 1);
-
-        // Enabling `adoc` collects both (still not `.txt`); observe() agrees.
-        let mut both = ScanConfig::new(vec![root.to_path_buf()]);
-        both.extensions = vec!["md".to_string(), "adoc".to_string()];
-        let snap = scan_tracked_markdown(&both);
-        assert!(snap.get(&root.join("a.md")).is_some());
-        assert!(snap.get(&root.join("b.adoc")).is_some());
         assert!(snap.get(&root.join("c.txt")).is_none());
-        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.len(), 1);
 
         // The live-watch path uses the same set: a tracked `.adoc` is observed (Created on a
         // fresh cursor), a non-watched `.txt` is ignored.
-        let mut engine = ScanEngine::open(both, tmp.path().join("cursor.json")).unwrap();
+        let mut engine = ScanEngine::open(default_docs, tmp.path().join("cursor.json")).unwrap();
         assert_eq!(
             engine.observe(&root.join("b.adoc")).unwrap().kind,
             ChangeKind::Created

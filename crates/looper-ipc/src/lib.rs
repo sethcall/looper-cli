@@ -575,7 +575,7 @@ pub struct LooperignorePreview {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../bindings/")]
 pub struct FileActivity {
-    /// Absolute path of the changed markdown file.
+    /// Absolute path of the changed document file.
     pub path: String,
     /// Commit time, milliseconds since the Unix epoch.
     pub at: f64,

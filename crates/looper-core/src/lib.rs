@@ -1977,16 +1977,14 @@ mod tests {
     }
 
     #[test]
-    fn watched_extensions_gate_adoc_discovery_and_indexing() {
+    fn default_watched_extensions_include_adoc_discovery_and_indexing() {
         let tmp = tempfile::tempdir().unwrap();
         let folder = tmp.path().join("notes");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("a.md"), "# Alpha\nhello").unwrap();
         std::fs::write(folder.join("b.adoc"), "= Beta\n\nworld").unwrap();
 
-        // Enable `.adoc` alongside `.md` for this workspace (item 70).
-        let mut workspace = make_workspace(tmp.path(), vec![folder.clone()]);
-        workspace.watched_extensions = vec!["md".to_string(), "adoc".to_string()];
+        let workspace = make_workspace(tmp.path(), vec![folder.clone()]);
 
         let engine = test_engine();
         let mut events = engine.subscribe();

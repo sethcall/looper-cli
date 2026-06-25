@@ -52,10 +52,14 @@ fn default_html_cache_size() -> usize {
     DEFAULT_HTML_CACHE_SIZE
 }
 
-/// Default watched file extensions for a workspace (item 70): markdown only, until the user
-/// enables more. Lowercase, no leading dot.
+/// Default watched file extensions for a workspace (item 70). Lowercase, no leading dot.
+pub const DEFAULT_WATCHED_EXTENSIONS: &[&str] = &["md", "adoc", "asciidoc"];
+
 fn default_watched_extensions() -> Vec<String> {
-    vec!["md".to_string()]
+    DEFAULT_WATCHED_EXTENSIONS
+        .iter()
+        .map(|ext| (*ext).to_string())
+        .collect()
 }
 
 /// A workspace: a named set of folders plus the directory holding its knowledge base.
@@ -91,8 +95,8 @@ pub struct Workspace {
     #[serde(default)]
     pub linking: looper_ipc::LinkingConfig,
     /// Watched file extensions (lowercase, no dot) the scan + watcher index — e.g. `["md", "adoc"]`
-    /// (item 70). `#[serde(default = "default_watched_extensions")]` → `["md"]` for workspaces
-    /// written before this field.
+    /// (item 70). `#[serde(default = "default_watched_extensions")]` supplies the current
+    /// document defaults for workspaces written before this field.
     #[serde(default = "default_watched_extensions")]
     pub watched_extensions: Vec<String>,
 }
@@ -790,8 +794,8 @@ mod tests {
         );
         assert_eq!(
             ws.watched_extensions,
-            vec!["md".to_string()],
-            "watched_extensions defaults to [md] for legacy workspaces (item 70)"
+            default_watched_extensions(),
+            "watched_extensions uses the current document defaults for legacy workspaces"
         );
     }
 
