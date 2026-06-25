@@ -8,6 +8,8 @@
 //! construct DTOs). See `../../AGENTS.md`.
 //! Implements plan item 07 (`../../specs/plan/07-ipc-and-type-gen.md`).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -233,6 +235,11 @@ pub struct WorkspaceInfo {
     /// File extensions the scan + watcher index (lowercase, no dot), e.g. `["md", "adoc"]`
     /// (item 70).
     pub watched_extensions: Vec<String>,
+    /// Default AsciiDoc renderer for the viewer — a renderer id (`asciidork` | `raw`), item 72.
+    pub adoc_renderer: String,
+    /// Default per-diagram-type renderer choices (item 72): diagram type → renderer id, e.g.
+    /// `{"mermaid": "mermaid-js"}`.
+    pub diagram_renderers: BTreeMap<String, String>,
     /// The knowledge-base backend (OKF today; the seam allows others).
     pub backend: KbBackend,
 }
@@ -282,6 +289,10 @@ pub struct UpdateWorkspaceRequest {
     pub html_cache_size: u32,
     /// New watched file extensions (lowercase, no dot), e.g. `["md", "adoc"]` (item 70).
     pub watched_extensions: Vec<String>,
+    /// New default AsciiDoc renderer — a renderer id (`asciidork` | `raw`), item 72.
+    pub adoc_renderer: String,
+    /// New default per-diagram-type renderer choices (item 72): diagram type → renderer id.
+    pub diagram_renderers: BTreeMap<String, String>,
 }
 
 /// A workspace folder's link status, for the sidebar's per-folder "link" toggle (item 29).

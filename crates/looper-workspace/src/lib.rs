@@ -16,6 +16,7 @@ pub mod link;
 pub mod linking;
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +63,19 @@ fn default_watched_extensions() -> Vec<String> {
         .collect()
 }
 
+/// Default AsciiDoc renderer for the document viewer (item 72): the native-Rust asciidork backend.
+pub const DEFAULT_ADOC_RENDERER: &str = "asciidork";
+
+fn default_adoc_renderer() -> String {
+    DEFAULT_ADOC_RENDERER.to_string()
+}
+
+/// Default per-diagram-type renderer choices (item 72): render Mermaid client-side. Keyed by
+/// diagram type → renderer id.
+fn default_diagram_renderers() -> BTreeMap<String, String> {
+    BTreeMap::from([("mermaid".to_string(), "mermaid-js".to_string())])
+}
+
 /// A workspace: a named set of folders plus the directory holding its knowledge base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -99,6 +113,14 @@ pub struct Workspace {
     /// document defaults for workspaces written before this field.
     #[serde(default = "default_watched_extensions")]
     pub watched_extensions: Vec<String>,
+    /// Default AsciiDoc renderer for the document viewer (item 72): a renderer id (`asciidork` |
+    /// `raw`). The viewer seeds its per-doc dropdown from this. `#[serde(default)]` → `asciidork`.
+    #[serde(default = "default_adoc_renderer")]
+    pub adoc_renderer: String,
+    /// Default per-diagram-type renderer choices (item 72): diagram type → renderer id
+    /// (e.g. `{"mermaid": "mermaid-js"}`). The viewer seeds its diagram toggles from this.
+    #[serde(default = "default_diagram_renderers")]
+    pub diagram_renderers: BTreeMap<String, String>,
 }
 
 impl Workspace {
@@ -346,6 +368,8 @@ impl WorkspaceStore {
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking,
             watched_extensions: default_watched_extensions(),
+            adoc_renderer: default_adoc_renderer(),
+            diagram_renderers: default_diagram_renderers(),
         });
         self.persist()?;
         Ok(id)
@@ -400,6 +424,22 @@ impl WorkspaceStore {
         extensions: Vec<String>,
     ) -> Result<(), WorkspaceError> {
         self.workspace_mut(id)?.watched_extensions = extensions;
+        self.persist()
+    }
+
+    /// Set a workspace's default AsciiDoc renderer + per-diagram-type renderer choices (item 72).
+    ///
+    /// # Errors
+    /// Returns [`WorkspaceError::NotFound`] for an unknown id, or a persistence error.
+    pub fn set_adoc_rendering(
+        &mut self,
+        id: &WorkspaceId,
+        adoc_renderer: String,
+        diagram_renderers: BTreeMap<String, String>,
+    ) -> Result<(), WorkspaceError> {
+        let workspace = self.workspace_mut(id)?;
+        workspace.adoc_renderer = adoc_renderer;
+        workspace.diagram_renderers = diagram_renderers;
         self.persist()
     }
 
@@ -797,6 +837,15 @@ mod tests {
             default_watched_extensions(),
             "watched_extensions uses the current document defaults for legacy workspaces"
         );
+        assert_eq!(
+            ws.adoc_renderer, DEFAULT_ADOC_RENDERER,
+            "adoc_renderer defaults to asciidork for legacy workspaces (item 72)"
+        );
+        assert_eq!(
+            ws.diagram_renderers.get("mermaid").map(String::as_str),
+            Some("mermaid-js"),
+            "diagram_renderers defaults Mermaid to client-side for legacy workspaces (item 72)"
+        );
     }
 
     #[test]
@@ -865,6 +914,8 @@ mod tests {
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking: looper_ipc::LinkingConfig::default(),
             watched_extensions: default_watched_extensions(),
+            adoc_renderer: default_adoc_renderer(),
+            diagram_renderers: default_diagram_renderers(),
         };
         let ex = ws.exclusion_paths();
         assert!(ex.contains(&PathBuf::from("/ws/kb")));
