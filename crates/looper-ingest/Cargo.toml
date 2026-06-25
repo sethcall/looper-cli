@@ -1,0 +1,14 @@
+[package]
+name = "looper-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Ingestion seam (item 70): prepares a watched source file into the markdown-envelope the KB indexes — markdown passthrough + a raw AsciiDoc metadata-lift."
+
+[dependencies]
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

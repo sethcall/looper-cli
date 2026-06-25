@@ -18,7 +18,7 @@ The dependency direction is always **desktop → looper-cli**, never the reverse
   (`vendor/knowledge-catalog`)** — which only the LLM enrichment path uses, so it lives with
   enrichment in the desktop repo, not here.
 
-## Crate map (14 crates)
+## Crate map (15 crates)
 
 **Foundational** (leaves — external deps only):
 
@@ -32,7 +32,10 @@ The dependency direction is always **desktop → looper-cli**, never the reverse
 - `looper-watcher` — `notify` + debounce; OS watch-limit detection + per-OS hints; watch-health.
 - `looper-git` — `gix` repo discovery + tracking.
 - `looper-workspace` — workspace model + `.looper` symlink/junction + scan/watch exclusions.
-- `looper-scan` — gitignore-aware markdown walk + blake3/mtime fingerprints + startup catch-up.
+- `looper-scan` — gitignore-aware walk (per-workspace watched extensions) + blake3/mtime fingerprints + startup catch-up.
+- `looper-ingest` — the **ingestion seam** (item 70): markdown passthrough + the raw **AsciiDoc** metadata-lift
+  (doctitle/attributes → frontmatter, body verbatim); prepares a watched source file into the markdown-envelope the KB
+  indexes. Leaf (external deps only).
 - `looper-kb` — the **swappable KB trait** + DTOs + in-memory `MockKb`.
 - `looper-okf` — concrete OKF producer (emit bundle md, `okf_id`, sidecar index) + Rust viz renderer.
 - `looper-sync` — the **swappable sync seam** (`Syncer`/`SyncBackend` trait) + git-CLI backend + `MockSyncer`.
@@ -52,10 +55,10 @@ The dependency direction is always **desktop → looper-cli**, never the reverse
 
 ## Dependency-direction rules (keep the graph acyclic)
 
-- Leaves depend only on external crates: `config`, `ipc`, `state`, `watcher`, `git`, `kb`.
+- Leaves depend only on external crates: `config`, `ipc`, `state`, `watcher`, `git`, `kb`, `ingest`.
 - `observability` → config · `workspace` → {state, git, config} · `scan` → {state, config, ipc} ·
-  `okf` → {kb, state, ipc} · `sync` → {ipc} · `enrichment` → {ipc}.
-- `core` → {config, observability, state, ipc, watcher, git, workspace, scan, **kb (trait)**,
+  `ingest` → {} (external only) · `okf` → {kb, state, ipc} · `sync` → {ipc} · `enrichment` → {ipc}.
+- `core` → {config, observability, state, ipc, watcher, git, workspace, scan, **ingest**, **kb (trait)**,
   **sync (trait)**, **enrichment (trait)**} — **never `looper-okf`** and never a concrete enricher.
 - The composition root (the `looper-cli` binary; the desktop `looper-app`) is the only place that
   names concrete backends.

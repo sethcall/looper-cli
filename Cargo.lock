@@ -1616,6 +1616,7 @@ version = "0.1.0"
 dependencies = [
  "looper-enrichment",
  "looper-git",
+ "looper-ingest",
  "looper-ipc",
  "looper-kb",
  "looper-scan",
@@ -1641,6 +1642,14 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "looper-ingest"
+version = "0.1.0"
+dependencies = [
+ "serde_yaml_ng",
  "thiserror 2.0.18",
 ]
 

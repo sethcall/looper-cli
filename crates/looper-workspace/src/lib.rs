@@ -52,6 +52,12 @@ fn default_html_cache_size() -> usize {
     DEFAULT_HTML_CACHE_SIZE
 }
 
+/// Default watched file extensions for a workspace (item 70): markdown only, until the user
+/// enables more. Lowercase, no leading dot.
+fn default_watched_extensions() -> Vec<String> {
+    vec!["md".to_string()]
+}
+
 /// A workspace: a named set of folders plus the directory holding its knowledge base.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -84,6 +90,11 @@ pub struct Workspace {
     /// workspaces.
     #[serde(default)]
     pub linking: looper_ipc::LinkingConfig,
+    /// Watched file extensions (lowercase, no dot) the scan + watcher index — e.g. `["md", "adoc"]`
+    /// (item 70). `#[serde(default = "default_watched_extensions")]` → `["md"]` for workspaces
+    /// written before this field.
+    #[serde(default = "default_watched_extensions")]
+    pub watched_extensions: Vec<String>,
 }
 
 impl Workspace {
@@ -243,10 +254,15 @@ fn contains_markdown(dir: &Path) -> bool {
     false
 }
 
+/// Whether `path` is an indexable doc (any supported source format). Used by the folder
+/// -discovery `has_markdown` hint, which is broader than a single workspace's watched set.
 fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "mdx" | "markdown"))
+    path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "md" | "mdx" | "markdown" | "adoc" | "asciidoc"
+        )
+    })
 }
 
 /// The persisted document of all workspaces.
@@ -325,6 +341,7 @@ impl WorkspaceStore {
             backend: looper_ipc::KbBackend::default(),
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking,
+            watched_extensions: default_watched_extensions(),
         });
         self.persist()?;
         Ok(id)
@@ -366,6 +383,19 @@ impl WorkspaceStore {
         size: usize,
     ) -> Result<(), WorkspaceError> {
         self.workspace_mut(id)?.html_cache_size = size;
+        self.persist()
+    }
+
+    /// Replace a workspace's watched file extensions (item 70). Stored lowercase, no dot.
+    ///
+    /// # Errors
+    /// Returns [`WorkspaceError::NotFound`] for an unknown id, or a persistence error.
+    pub fn set_watched_extensions(
+        &mut self,
+        id: &WorkspaceId,
+        extensions: Vec<String>,
+    ) -> Result<(), WorkspaceError> {
+        self.workspace_mut(id)?.watched_extensions = extensions;
         self.persist()
     }
 
@@ -758,6 +788,11 @@ mod tests {
             looper_ipc::LinkingConfig::default(),
             "linking defaults to empty for legacy workspaces"
         );
+        assert_eq!(
+            ws.watched_extensions,
+            vec!["md".to_string()],
+            "watched_extensions defaults to [md] for legacy workspaces (item 70)"
+        );
     }
 
     #[test]
@@ -825,6 +860,7 @@ mod tests {
             backend: looper_ipc::KbBackend::default(),
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking: looper_ipc::LinkingConfig::default(),
+            watched_extensions: default_watched_extensions(),
         };
         let ex = ws.exclusion_paths();
         assert!(ex.contains(&PathBuf::from("/ws/kb")));

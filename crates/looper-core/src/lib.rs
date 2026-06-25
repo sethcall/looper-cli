@@ -791,6 +791,7 @@ fn run_workspace(
     let excluded = canonicalize_all(&workspace.exclusion_paths());
     let mut config = ScanConfig::new(folders.clone());
     config.excluded_prefixes = excluded.clone();
+    config.extensions = workspace.watched_extensions.clone();
     let cursor = workspace.kb_dir.join("scan-cursor.json");
     let mut scan = match ScanEngine::open(config, cursor) {
         Ok(scan) => scan,
@@ -825,7 +826,10 @@ fn run_workspace(
 
     // 4. Watch for live changes (KB dir + `.looper` excluded from watching too).
     // Also watch `.looperignore` so a hand-edit while running triggers a reconcile (item 47).
-    let mut filter = WatchFilter::markdown().also_filename(".looperignore");
+    // The watched extensions mirror the scan config (item 70), so `.adoc` etc. fire live too.
+    let mut filter = WatchFilter::with_extensions(workspace.watched_extensions.iter().cloned())
+        .ignoring_default_dirs()
+        .also_filename(".looperignore");
     for prefix in &excluded {
         filter = filter.ignoring_path(prefix.clone());
     }
@@ -1103,11 +1107,26 @@ fn apply_and_emit(
             let Some(concept_id) = concept_id_for(&change.path, folders) else {
                 return; // under no workspace folder; nothing to index
             };
-            let content = match std::fs::read_to_string(&change.path) {
-                Ok(content) => content,
+            let raw = match std::fs::read_to_string(&change.path) {
+                Ok(raw) => raw,
                 Err(error) => {
                     emit(bus, warn(wid, format!("could not read source: {error}")));
                     return;
+                }
+            };
+            // Prepare the source into the markdown-envelope the KB indexes (item 70): markdown
+            // passes through; AsciiDoc is metadata-lifted (doctitle/attrs → frontmatter, body
+            // verbatim). On the rare prepare failure, fall back to the raw content.
+            let extension = change
+                .path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default();
+            let content = match looper_ingest::prepare(extension, &raw, &concept_id) {
+                Ok(content) => content,
+                Err(error) => {
+                    emit(bus, warn(wid, format!("ingest prepare failed: {error}")));
+                    raw
                 }
             };
             match kb.index(&SourceDoc {
@@ -1136,8 +1155,9 @@ fn apply_and_emit(
 }
 
 /// Concept id for `path`: the containing folder's name plus the path relative to it,
-/// without the `.md` extension, `/`-joined (e.g. `notes/specs/auth`). `None` if `path`
-/// is under no workspace folder.
+/// **including** the file extension, `/`-joined (e.g. `notes/specs/auth.md`). `None` if
+/// `path` is under no workspace folder. The extension is kept so distinct formats with the
+/// same stem (`foo.md` vs `foo.adoc`) get distinct ids + bundles (item 70).
 fn concept_id_for(path: &Path, folders: &[PathBuf]) -> Option<String> {
     for folder in folders {
         let Ok(relative) = path.strip_prefix(folder) else {
@@ -1147,7 +1167,6 @@ fn concept_id_for(path: &Path, folders: &[PathBuf]) -> Option<String> {
         if let Some(name) = folder.file_name() {
             segments.push(name.to_string_lossy().into_owned());
         }
-        let relative = relative.with_extension("");
         segments.extend(
             relative
                 .components()
@@ -1952,6 +1971,47 @@ mod tests {
     }
 
     #[test]
+    fn watched_extensions_gate_adoc_discovery_and_indexing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("notes");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.md"), "# Alpha\nhello").unwrap();
+        std::fs::write(folder.join("b.adoc"), "= Beta\n\nworld").unwrap();
+
+        // Enable `.adoc` alongside `.md` for this workspace (item 70).
+        let mut workspace = make_workspace(tmp.path(), vec![folder.clone()]);
+        workspace.watched_extensions = vec!["md".to_string(), "adoc".to_string()];
+
+        let engine = test_engine();
+        let mut events = engine.subscribe();
+        engine.open_workspace(workspace).unwrap();
+
+        // Both the `.md` and the `.adoc` are discovered + indexed; the adoc concept id keeps
+        // its extension (item 70 native-extension bundles).
+        let startup = collect_until(&mut events, Duration::from_secs(10), |e| {
+            matches!(e, EngineEvent::ScanCompleted { .. })
+        });
+        assert!(
+            startup
+                .iter()
+                .any(|e| matches!(e, EngineEvent::ScanStarted { total: 2, .. })),
+            "expected ScanStarted total=2 (md + adoc), got {startup:#?}"
+        );
+        // The adoc concept id keeps its extension, and its title is lifted from the `= Beta`
+        // doctitle (item 70 ingest), not the filename — proof the lift is wired in.
+        assert!(
+            startup.iter().any(|e| matches!(
+                e,
+                EngineEvent::DocIndexed { concept_id, path, title, .. }
+                    if concept_id == "notes/b.adoc" && path.ends_with("b.adoc") && title == "Beta"
+            )),
+            "expected the .adoc to index with an extension-bearing id + doctitle title, got {startup:#?}"
+        );
+
+        engine.shutdown();
+    }
+
+    #[test]
     fn rejects_double_open_of_the_same_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let folder = tmp.path().join("f");
@@ -2018,7 +2078,7 @@ mod tests {
         let folders = vec![PathBuf::from("/home/me/notes")];
         assert_eq!(
             concept_id_for(Path::new("/home/me/notes/specs/auth.md"), &folders).as_deref(),
-            Some("notes/specs/auth")
+            Some("notes/specs/auth.md")
         );
         assert_eq!(concept_id_for(Path::new("/elsewhere/x.md"), &folders), None);
     }

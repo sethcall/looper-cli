@@ -74,7 +74,41 @@ struct OkfIndex {
 }
 
 impl Versioned for OkfIndex {
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
+
+    /// v1 → v2 (item 70 — native-extension bundles): `concept_id` was stored without the
+    /// source file's extension; backfill it from each entry's source-path key. The old bundle
+    /// file `{old_id}.md` now equals `{new_id}`, so **nothing on disk moves**. Idempotent
+    /// (skips already-suffixed ids) and lenient (entries whose key has no extension are kept).
+    fn migrate(
+        from_version: u32,
+        mut value: serde_json::Value,
+    ) -> Result<serde_json::Value, looper_state::StateError> {
+        if from_version != 1 {
+            return Err(looper_state::StateError::UnsupportedVersion {
+                found: from_version,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        if let Some(entries) = value.get_mut("entries").and_then(|e| e.as_object_mut()) {
+            for (source_path, entry) in entries.iter_mut() {
+                let Some(ext) = Path::new(source_path).extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                let Some(obj) = entry.as_object_mut() else {
+                    continue;
+                };
+                if let Some(concept_id) = obj.get("concept_id").and_then(|c| c.as_str()) {
+                    let suffix = format!(".{ext}");
+                    if !concept_id.ends_with(&suffix) {
+                        let migrated = format!("{concept_id}{suffix}");
+                        obj.insert("concept_id".into(), serde_json::Value::String(migrated));
+                    }
+                }
+            }
+        }
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +184,9 @@ impl OkfKb {
     }
 
     fn concept_path(&self, concept_id: &str) -> PathBuf {
-        self.bundle_dir.join(format!("{concept_id}.md"))
+        // The concept id is the bundle-relative path verbatim (extension included), so the
+        // bundle file is named exactly the id — no extension is appended (item 70).
+        self.bundle_dir.join(concept_id)
     }
 
     fn index_impl(&self, doc: &SourceDoc) -> Result<ConceptRef, OkfError> {
@@ -516,7 +552,7 @@ fn search_entry(concept_id: &str, fm: &Mapping, body: &str) -> SearchEntry {
 fn build_search_index(bundle_dir: &Path, index: &OkfIndex) -> BTreeMap<String, SearchEntry> {
     let mut search = BTreeMap::new();
     for entry in index.entries.values() {
-        let path = bundle_dir.join(format!("{}.md", entry.concept_id));
+        let path = bundle_dir.join(&entry.concept_id);
         if let Ok(content) = std::fs::read_to_string(&path) {
             let doc = Document::parse(&content);
             search.insert(
@@ -596,9 +632,9 @@ mod tests {
 
         let kb = OkfKb::open(&bundle, &index).unwrap();
         let r = kb
-            .index(&doc(&src, "docs/readme", "# Readme\n\nhello\n"))
+            .index(&doc(&src, "docs/readme.md", "# Readme\n\nhello\n"))
             .unwrap();
-        assert_eq!(r.concept_id, "docs/readme");
+        assert_eq!(r.concept_id, "docs/readme.md");
         assert!(r.okf_id.starts_with("urn:looper:doc:"));
 
         // The bundle concept file exists and is OKF-conformant (parseable frontmatter,
@@ -623,7 +659,7 @@ mod tests {
 
         // Re-index preserves okf_id across a content edit.
         let r2 = kb
-            .index(&doc(&src, "docs/readme", "# Readme\n\nedited\n"))
+            .index(&doc(&src, "docs/readme.md", "# Readme\n\nedited\n"))
             .unwrap();
         assert_eq!(r.okf_id, r2.okf_id);
     }
@@ -634,7 +670,7 @@ mod tests {
         let kb = OkfKb::open(tmp.path().join("b"), tmp.path().join("i.json")).unwrap();
         let content = "---\nokf_id: urn:custom:42\ntype: Spec\n---\n# T\nbody\n";
         let r = kb
-            .index(&doc(&tmp.path().join("a.md"), "a", content))
+            .index(&doc(&tmp.path().join("a.md"), "a.md", content))
             .unwrap();
         assert_eq!(r.okf_id, "urn:custom:42");
         let emitted = std::fs::read_to_string(tmp.path().join("b/a.md")).unwrap();
@@ -650,7 +686,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let kb = OkfKb::open(tmp.path().join("b"), tmp.path().join("i.json")).unwrap();
         let src = tmp.path().join("a.md");
-        kb.index(&doc(&src, "a", "# T\nbody\n")).unwrap();
+        kb.index(&doc(&src, "a.md", "# T\nbody\n")).unwrap();
 
         // The indexed view is the *emitted bundle* — producer frontmatter the source lacked, body kept.
         let indexed = kb.read_indexed(&src).expect("indexed doc is readable");
@@ -672,19 +708,21 @@ mod tests {
 
         let r = {
             let kb = OkfKb::open(&bundle, &index).unwrap();
-            kb.index(&doc(&tmp.path().join("b.md"), "b", "# B\nbanana\n"))
+            kb.index(&doc(&tmp.path().join("b.md"), "b.md", "# B\nbanana\n"))
                 .unwrap();
-            kb.index(&doc(&src_a, "a", "# A\napple\n")).unwrap()
+            kb.index(&doc(&src_a, "a.md", "# A\napple\n")).unwrap()
         };
 
         // Reopen: the persisted index keeps okf_ids stable.
         let kb = OkfKb::open(&bundle, &index).unwrap();
-        let r2 = kb.index(&doc(&src_a, "a", "# A\napple again\n")).unwrap();
+        let r2 = kb
+            .index(&doc(&src_a, "a.md", "# A\napple again\n"))
+            .unwrap();
         assert_eq!(r.okf_id, r2.okf_id);
 
         let hits = kb.search("banana", 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].concept_id, "b");
+        assert_eq!(hits[0].concept_id, "b.md");
 
         kb.remove(&tmp.path().join("b.md")).unwrap();
         assert!(!bundle.join("b.md").exists());
@@ -700,7 +738,7 @@ mod tests {
             let kb = OkfKb::open(&bundle, &index).unwrap();
             kb.index(&doc(
                 &tmp.path().join("x.md"),
-                "notes/x",
+                "notes/x.md",
                 "# X\nplankton recipe\n",
             ))
             .unwrap();
@@ -710,7 +748,7 @@ mod tests {
         let kb = OkfKb::open(&bundle, &index).unwrap();
         let by_body = kb.search("plankton", 10).unwrap();
         assert_eq!(by_body.len(), 1);
-        assert_eq!(by_body[0].concept_id, "notes/x");
+        assert_eq!(by_body[0].concept_id, "notes/x.md");
         // Title/id are searchable too.
         assert_eq!(kb.search("notes/x", 10).unwrap().len(), 1);
     }
@@ -721,9 +759,9 @@ mod tests {
         let kb = OkfKb::open(tmp.path().join("b"), tmp.path().join("i.json")).unwrap();
         let src_a = tmp.path().join("a.md");
         let src_b = tmp.path().join("b.md");
-        kb.index(&doc(&src_a, "a", "---\ntags: [api]\n---\n# A\n"))
+        kb.index(&doc(&src_a, "a.md", "---\ntags: [api]\n---\n# A\n"))
             .unwrap();
-        kb.index(&doc(&src_b, "b", "---\ntags: [api, infra]\n---\n# B\n"))
+        kb.index(&doc(&src_b, "b.md", "---\ntags: [api, infra]\n---\n# B\n"))
             .unwrap();
 
         // `api` on two docs, `infra` on one → most-used first.
@@ -735,7 +773,7 @@ mod tests {
         assert_eq!(kb.documents_by_tag("api").len(), 2);
 
         // Re-index a.md without its tag → `api` drops to one doc.
-        kb.index(&doc(&src_a, "a", "# A no tags\n")).unwrap();
+        kb.index(&doc(&src_a, "a.md", "# A no tags\n")).unwrap();
         assert!(kb
             .tag_counts()
             .iter()
@@ -759,7 +797,7 @@ mod tests {
             let kb = OkfKb::open(&bundle, &index).unwrap();
             kb.index(&doc(
                 &src,
-                "a",
+                "a.md",
                 "---\ntags: [Product, Roadmap]\n---\n# A\nbody\n",
             ))
             .unwrap();
@@ -794,7 +832,7 @@ mod tests {
         let src = tmp.path().join("a.md");
         {
             let kb = OkfKb::open(&bundle, &index).unwrap();
-            kb.index(&doc(&src, "a", "# A\nbody\n")).unwrap();
+            kb.index(&doc(&src, "a.md", "# A\nbody\n")).unwrap();
             assert!(kb.tag_counts().is_empty());
         }
         std::fs::write(
@@ -815,7 +853,7 @@ mod tests {
         let index = tmp.path().join("i.json");
         let src = tmp.path().join("a.md");
         let kb = OkfKb::open(&bundle, &index).unwrap();
-        kb.index(&doc(&src, "a", "# A\nbody\n")).unwrap();
+        kb.index(&doc(&src, "a.md", "# A\nbody\n")).unwrap();
         assert!(kb.tag_counts().is_empty());
 
         // Simulate enrichment rewriting the bundle (the KB output) in place.
@@ -850,7 +888,7 @@ mod tests {
         let src = tmp.path().join("a.md");
         {
             let kb = OkfKb::open(&bundle, &index).unwrap();
-            kb.index(&doc(&src, "a", "---\ntags: [api]\n---\n# A\n"))
+            kb.index(&doc(&src, "a.md", "---\ntags: [api]\n---\n# A\n"))
                 .unwrap();
         }
         // Simulate a pre-item-67 sidecar: strip the persisted title/labels from the entry, as if
@@ -869,5 +907,38 @@ mod tests {
         let kb = OkfKb::open(&bundle, &index).unwrap();
         assert_eq!(kb.documents_by_tag("api").len(), 1);
         assert_eq!(kb.list_documents()[0].labels, vec!["api".to_string()]);
+    }
+
+    #[test]
+    fn sidecar_v1_concept_ids_are_backfilled_with_extension_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("b");
+        let index = tmp.path().join("i.json");
+        let src = tmp.path().join("notes/x.md");
+        {
+            let kb = OkfKb::open(&bundle, &index).unwrap();
+            kb.index(&doc(&src, "notes/x.md", "# X\nplankton\n"))
+                .unwrap();
+        }
+        // Rewrite the sidecar as a pre-item-70 v1: schema_version 1 + an extension-less
+        // concept_id. The bundle file on disk stays `b/notes/x.md` — exactly what the migrated
+        // id (`notes/x.md`) maps to, so nothing has to move.
+        let raw = std::fs::read_to_string(&index).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        json["schema_version"] = serde_json::json!(1);
+        for entry in json["data"]["entries"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            entry["concept_id"] = serde_json::json!("notes/x");
+        }
+        std::fs::write(&index, serde_json::to_string(&json).unwrap()).unwrap();
+
+        // Reopen: the v1→v2 migration backfills the extension; search resolves via the bundle.
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+        let hits = kb.search("plankton", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].concept_id, "notes/x.md");
     }
 }

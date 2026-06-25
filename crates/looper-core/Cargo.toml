@@ -11,6 +11,8 @@ description = "Orchestration engine wiring watcher+scan+workspace+git+KB trait; 
 looper-kb = { workspace = true }
 looper-ipc = { workspace = true }
 looper-scan = { workspace = true }
+# The ingestion seam (item 70): markdown passthrough + the raw AsciiDoc metadata-lift.
+looper-ingest = { workspace = true }
 looper-watcher = { workspace = true }
 looper-git = { workspace = true }
 looper-workspace = { workspace = true }

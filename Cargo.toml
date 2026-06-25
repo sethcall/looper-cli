@@ -23,6 +23,7 @@ looper-git = { path = "crates/looper-git" }
 looper-workspace = { path = "crates/looper-workspace" }
 looper-scan = { path = "crates/looper-scan" }
 looper-kb = { path = "crates/looper-kb" }
+looper-ingest = { path = "crates/looper-ingest" }
 looper-okf = { path = "crates/looper-okf" }
 looper-sync = { path = "crates/looper-sync" }
 looper-enrichment = { path = "crates/looper-enrichment" }

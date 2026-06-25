@@ -111,21 +111,33 @@ pub struct ScanConfig {
     pub respect_gitignore: bool,
     /// Path prefixes to exclude (e.g. a workspace's KB dir and `.looper` links).
     pub excluded_prefixes: Vec<PathBuf>,
+    /// File extensions to index, lowercase, no dot (e.g. `["md", "adoc"]`). Defaults to
+    /// `["md"]`; the engine sets it from the workspace's watched extensions (item 70).
+    pub extensions: Vec<String>,
 }
 
 impl ScanConfig {
-    /// A gitignore-respecting config for `roots` with no extra exclusions.
+    /// A gitignore-respecting config for `roots` with no extra exclusions, watching `.md`.
     #[must_use]
     pub fn new(roots: Vec<PathBuf>) -> Self {
         Self {
             roots,
             respect_gitignore: true,
             excluded_prefixes: Vec::new(),
+            extensions: vec!["md".to_string()],
         }
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
         self.excluded_prefixes.iter().any(|p| path.starts_with(p))
+    }
+
+    /// Whether `path`'s extension is in the configured watched set (case-insensitive).
+    fn is_tracked(&self, path: &Path) -> bool {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return false;
+        };
+        self.extensions.iter().any(|x| x.eq_ignore_ascii_case(ext))
     }
 }
 
@@ -203,7 +215,7 @@ pub fn walk_markdown_paths(config: &ScanConfig) -> Vec<PathBuf> {
 
         for entry in builder.build().filter_map(Result::ok) {
             let path = entry.path();
-            if entry.file_type().is_some_and(|t| t.is_file()) && is_markdown(path) {
+            if entry.file_type().is_some_and(|t| t.is_file()) && config.is_tracked(path) {
                 paths.push(path.to_path_buf());
             }
         }
@@ -412,7 +424,7 @@ impl ScanEngine {
     /// detected change, if any (paths that are not tracked markdown, or unchanged, yield
     /// `None`).
     pub fn observe(&mut self, path: &Path) -> Option<Change> {
-        if !is_markdown(path) || self.config.is_excluded(path) {
+        if !self.config.is_tracked(path) || self.config.is_excluded(path) {
             return None;
         }
         let previous = self.snapshot.files.get(path).cloned();
@@ -530,6 +542,40 @@ mod tests {
             "looperignored"
         );
         assert_eq!(snap.len(), 2);
+    }
+
+    #[test]
+    fn scan_honors_configured_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("a.md"), "a");
+        write(&root.join("b.adoc"), "b");
+        write(&root.join("c.txt"), "c");
+
+        // Default config watches `.md` only — `.adoc` is not collected.
+        let md_only = ScanConfig::new(vec![root.to_path_buf()]);
+        let snap = scan_tracked_markdown(&md_only);
+        assert!(snap.get(&root.join("a.md")).is_some());
+        assert!(snap.get(&root.join("b.adoc")).is_none());
+        assert_eq!(snap.len(), 1);
+
+        // Enabling `adoc` collects both (still not `.txt`); observe() agrees.
+        let mut both = ScanConfig::new(vec![root.to_path_buf()]);
+        both.extensions = vec!["md".to_string(), "adoc".to_string()];
+        let snap = scan_tracked_markdown(&both);
+        assert!(snap.get(&root.join("a.md")).is_some());
+        assert!(snap.get(&root.join("b.adoc")).is_some());
+        assert!(snap.get(&root.join("c.txt")).is_none());
+        assert_eq!(snap.len(), 2);
+
+        // The live-watch path uses the same set: a tracked `.adoc` is observed (Created on a
+        // fresh cursor), a non-watched `.txt` is ignored.
+        let mut engine = ScanEngine::open(both, tmp.path().join("cursor.json")).unwrap();
+        assert_eq!(
+            engine.observe(&root.join("b.adoc")).unwrap().kind,
+            ChangeKind::Created
+        );
+        assert!(engine.observe(&root.join("c.txt")).is_none());
     }
 
     #[test]

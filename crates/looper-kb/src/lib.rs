@@ -23,8 +23,9 @@ pub use error::KbError;
 pub struct SourceDoc {
     /// Absolute path of the source file (the index key; also recorded for sync).
     pub source_path: PathBuf,
-    /// Bundle-relative concept id without `.md` (e.g. `docs/readme`). The caller derives
-    /// it from the source path relative to its workspace folder.
+    /// Bundle-relative concept id — the verbatim path relative to the workspace folder,
+    /// **including** the file extension (e.g. `docs/readme.md`, `docs/guide.adoc`). The
+    /// extension is the id's format discriminator + the bundle file name (item 70).
     pub concept_id: String,
     /// The raw markdown content (frontmatter + body).
     pub content: String,
@@ -165,8 +166,12 @@ pub trait Kb: Send + Sync {
     }
 }
 
+/// Doc extensions stripped from the filename when falling back to a title (item 70:
+/// `concept_id` now carries the source extension, which should not show in a title).
+const DOC_EXTENSIONS: [&str; 5] = ["md", "markdown", "mdx", "adoc", "asciidoc"];
+
 /// Derive a display title from markdown content: the first ATX `# ` heading, else the
-/// last segment of `concept_id`.
+/// last segment of `concept_id` with a known doc extension stripped.
 #[must_use]
 pub fn derive_title(content: &str, concept_id: &str) -> String {
     for line in content.lines() {
@@ -178,11 +183,41 @@ pub fn derive_title(content: &str, concept_id: &str) -> String {
             }
         }
     }
-    concept_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(concept_id)
-        .to_string()
+    let name = concept_id.rsplit('/').next().unwrap_or(concept_id);
+    strip_doc_extension(name).to_string()
+}
+
+/// The `title:` value from a leading `---` YAML frontmatter block, if present. A minimal,
+/// dependency-free parse so `MockKb` reflects the same "explicit frontmatter `title` wins"
+/// contract a real KB (`OkfKb`) honors — important once a producer/ingest step synthesizes
+/// frontmatter (item 70).
+fn frontmatter_title(content: &str) -> Option<String> {
+    let rest = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---\n").or_else(|| rest.find("\n---\r\n"))?;
+    for line in rest[..end].lines() {
+        if let Some(value) = line.strip_prefix("title:") {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Strip a recognized doc extension (`.md`, `.adoc`, …) from a filename, if present.
+fn strip_doc_extension(name: &str) -> &str {
+    if let Some(dot) = name.rfind('.') {
+        if DOC_EXTENSIONS
+            .iter()
+            .any(|ext| name[dot + 1..].eq_ignore_ascii_case(ext))
+        {
+            return &name[..dot];
+        }
+    }
+    name
 }
 
 /// An in-memory no-op backend that exercises the DI seam in tests.
@@ -229,7 +264,8 @@ impl Kb for MockKb {
         Ok(ConceptRef {
             okf_id,
             concept_id: doc.concept_id.clone(),
-            title: derive_title(&doc.content, &doc.concept_id),
+            title: frontmatter_title(&doc.content)
+                .unwrap_or_else(|| derive_title(&doc.content, &doc.concept_id)),
             labels: Vec::new(),
         })
     }
@@ -331,6 +367,11 @@ mod tests {
     fn derive_title_prefers_h1_then_filename() {
         assert_eq!(derive_title("# Hello\n\nbody", "x/y"), "Hello");
         assert_eq!(derive_title("no heading", "x/readme"), "readme");
+        // The id carries the source extension now (item 70) — strip it for the fallback title.
+        assert_eq!(derive_title("no heading", "x/readme.md"), "readme");
+        assert_eq!(derive_title("no heading", "docs/guide.adoc"), "guide");
+        // A non-doc dotted name is left intact.
+        assert_eq!(derive_title("no heading", "data.v2"), "data.v2");
     }
 
     #[test]
@@ -360,5 +401,24 @@ mod tests {
         let kb: std::sync::Arc<dyn Kb> = std::sync::Arc::new(MockKb::default());
         assert_eq!(kb.name(), "mock");
         kb.index(&doc("/x.md", "x", "hi")).unwrap();
+    }
+
+    #[test]
+    fn mock_index_prefers_frontmatter_title_then_falls_back() {
+        let kb = MockKb::default();
+        // An explicit frontmatter `title:` wins (as a real KB / item-70 ingest output).
+        let r = kb
+            .index(&doc(
+                "/ws/g.adoc",
+                "docs/g.adoc",
+                "---\ntitle: Guide\n---\n= Guide\nbody",
+            ))
+            .unwrap();
+        assert_eq!(r.title, "Guide");
+        // No frontmatter title → filename stem (extension stripped).
+        let r2 = kb
+            .index(&doc("/ws/h.adoc", "notes/h.adoc", "= H\nbody"))
+            .unwrap();
+        assert_eq!(r2.title, "h");
     }
 }

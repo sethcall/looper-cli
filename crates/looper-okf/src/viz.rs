@@ -176,10 +176,16 @@ fn palette_color(ty: &str) -> &'static str {
         .map_or(DEFAULT_NODE_COLOR, |(_, v)| v)
 }
 
-/// `](/some/path.md)` or `](/some/path.md#anchor)` — captures the `/…md` target.
+/// `](/some/path.md)` or `](/some/path.adoc#anchor)` — captures the `/…` doc target,
+/// extension included (the extension is part of the concept id now, item 70).
 fn link_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\]\((/[A-Za-z0-9_./-]+\.md)(?:#[A-Za-z0-9_-]*)?\)").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\]\((/[A-Za-z0-9_./-]+\.(?:md|markdown|mdx|adoc|asciidoc))(?:#[A-Za-z0-9_-]*)?\)",
+        )
+        .unwrap()
+    })
 }
 
 /// Extract de-duplicated, order-preserving concept ids linked from `body`.
@@ -187,11 +193,8 @@ fn extract_links(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for cap in link_re().captures_iter(body) {
-        // Strip the leading slash(es) and the `.md` suffix to get the concept id.
-        let mut cid = cap[1].trim_start_matches('/').to_string();
-        if let Some(stripped) = cid.strip_suffix(".md") {
-            cid = stripped.to_string();
-        }
+        // The concept id is the target minus the leading slash — the extension stays (item 70).
+        let cid = cap[1].trim_start_matches('/').to_string();
         if !cid.is_empty() && seen.insert(cid.clone()) {
             out.push(cid);
         }
@@ -199,7 +202,7 @@ fn extract_links(body: &str) -> Vec<String> {
     out
 }
 
-/// Recursively collect `*.md` paths under `dir`.
+/// Recursively collect bundle doc paths (`*.md` / `*.adoc`) under `dir`.
 fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), OkfError> {
     let read = std::fs::read_dir(dir).map_err(|source| OkfError::Io {
         path: dir.to_path_buf(),
@@ -217,7 +220,11 @@ fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), OkfError> {
         })?;
         if ft.is_dir() {
             collect_md(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "md" | "markdown" | "mdx" | "adoc" | "asciidoc"))
+        {
             out.push(path);
         }
     }
@@ -235,8 +242,8 @@ fn walk_concepts(bundle_root: &Path) -> Result<Vec<Concept>, OkfError> {
             continue;
         }
         let rel = md_path.strip_prefix(bundle_root).unwrap_or(&md_path);
+        // The bundle-relative path *is* the concept id now — extension included (item 70).
         let concept_id = rel
-            .with_extension("")
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -452,14 +459,14 @@ mod tests {
 
         let graph = payload(&std::fs::read_to_string(&out).unwrap())["graph"].clone();
         let ids = node_ids(&graph);
-        assert!(!ids.contains("index"));
+        assert!(!ids.contains("index.md"));
         assert_eq!(
             ids,
             HashSet::from([
-                "datasets/my_dataset".to_string(),
-                "tables/users".to_string(),
-                "tables/events".to_string(),
-                "references/metrics/dau".to_string(),
+                "datasets/my_dataset.md".to_string(),
+                "tables/users.md".to_string(),
+                "tables/events.md".to_string(),
+                "references/metrics/dau.md".to_string(),
             ])
         );
     }
@@ -475,10 +482,10 @@ mod tests {
         let graph = payload(&std::fs::read_to_string(&out).unwrap())["graph"].clone();
         let pairs = edge_pairs(&graph);
         let want = |a: &str, b: &str| (a.to_string(), b.to_string());
-        assert!(pairs.contains(&want("datasets/my_dataset", "tables/users")));
-        assert!(pairs.contains(&want("tables/users", "tables/events")));
-        assert!(pairs.contains(&want("tables/users", "references/metrics/dau")));
-        assert!(pairs.contains(&want("tables/events", "tables/users")));
+        assert!(pairs.contains(&want("datasets/my_dataset.md", "tables/users.md")));
+        assert!(pairs.contains(&want("tables/users.md", "tables/events.md")));
+        assert!(pairs.contains(&want("tables/users.md", "references/metrics/dau.md")));
+        assert!(pairs.contains(&want("tables/events.md", "tables/users.md")));
     }
 
     #[test]
@@ -518,9 +525,9 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
-        assert_eq!(color("datasets/my_dataset"), "#8b5cf6");
-        assert_eq!(color("tables/users"), "#3b82f6");
-        assert_eq!(color("references/metrics/dau"), "#10b981");
+        assert_eq!(color("datasets/my_dataset.md"), "#8b5cf6");
+        assert_eq!(color("tables/users.md"), "#3b82f6");
+        assert_eq!(color("references/metrics/dau.md"), "#10b981");
     }
 
     #[test]
@@ -549,7 +556,7 @@ mod tests {
         assert!(html.contains("\\u003c/script>"));
         // And it still round-trips back to the real string for the viewer.
         let graph = payload(&html)["graph"].clone();
-        assert!(graph["bodies"]["danger"]
+        assert!(graph["bodies"]["danger.md"]
             .as_str()
             .unwrap()
             .contains("</script>"));
