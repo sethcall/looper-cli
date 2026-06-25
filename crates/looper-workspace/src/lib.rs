@@ -401,6 +401,27 @@ impl WorkspaceStore {
         self.persist()
     }
 
+    /// Remove a source folder from a workspace (item 73): drop it from `folders` and from all
+    /// folder-coupled config — Auto Sync entries, Linking specs-folders + per-link references — and
+    /// remove its `kb` link. The caller then reopens the workspace so the scan evicts the folder's
+    /// documents (they fall out of the cursor diff as `Removed`) and the watcher rebuilds without it.
+    ///
+    /// # Errors
+    /// Returns [`WorkspaceError::NotFound`] for an unknown id, or a persistence error.
+    pub fn remove_folder(&mut self, id: &WorkspaceId, folder: &Path) -> Result<(), WorkspaceError> {
+        let folder_str = folder.to_string_lossy().into_owned();
+        let workspace = self.workspace_mut(id)?;
+        workspace.folders.retain(|f| f.as_path() != folder);
+        workspace.sync.retain(|c| c.folder != folder_str);
+        workspace.linking.specs_folders.retain(|f| f != &folder_str);
+        workspace.linking.links.retain(|l| {
+            l.host != folder_str && l.specs_folder.as_deref() != Some(folder_str.as_str())
+        });
+        // Best-effort: the folder's `kb` link is no longer part of the workspace.
+        let _ = link::remove(folder);
+        self.persist()
+    }
+
     /// Set a workspace's document-viewer LRU cache size (plan item 27).
     ///
     /// # Errors
@@ -885,6 +906,54 @@ mod tests {
         cfg.enabled = false;
         reopened.set_folder_sync_config(&id, cfg).unwrap();
         assert!(reopened.get(&id).unwrap().sync.is_empty());
+    }
+
+    #[test]
+    fn remove_folder_drops_folder_and_coupled_config() {
+        use looper_ipc::{SyncDirection, SyncFolderConfig, SyncStrategy};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = WorkspaceStore::open(tmp.path().join("w.json")).unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        let id = store
+            .create("W", vec![a.clone(), b.clone()], tmp.path().join("kb"))
+            .unwrap();
+        // Make `a` a specs folder + give it an Auto Sync entry, to prove the coupled config clears.
+        store
+            .set_linking_config(
+                &id,
+                LinkingConfig {
+                    specs_folders: vec![a.to_string_lossy().into_owned()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .set_folder_sync_config(
+                &id,
+                SyncFolderConfig {
+                    folder: a.to_string_lossy().into_owned(),
+                    is_kb: false,
+                    is_git_repo: true,
+                    enabled: true,
+                    strategy: SyncStrategy::Git,
+                    branch: "main".to_string(),
+                    direction: SyncDirection::PullPush,
+                    dolt: None,
+                },
+            )
+            .unwrap();
+
+        store.remove_folder(&id, &a).unwrap();
+
+        let ws = store.get(&id).unwrap();
+        assert_eq!(ws.folders, vec![b], "folder `a` dropped, `b` kept");
+        assert!(
+            ws.linking.specs_folders.is_empty(),
+            "specs-folder ref cleared"
+        );
+        assert!(ws.sync.is_empty(), "Auto Sync entry cleared");
     }
 
     #[test]
