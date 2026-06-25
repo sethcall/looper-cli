@@ -230,6 +230,9 @@ pub struct WorkspaceInfo {
     pub kb_dir: String,
     /// Max rendered-HTML files kept in the document-viewer LRU cache (plan item 27).
     pub html_cache_size: u32,
+    /// File extensions the scan + watcher index (lowercase, no dot), e.g. `["md", "adoc"]`
+    /// (item 70).
+    pub watched_extensions: Vec<String>,
     /// The knowledge-base backend (OKF today; the seam allows others).
     pub backend: KbBackend,
 }
@@ -277,6 +280,8 @@ pub struct UpdateWorkspaceRequest {
     pub name: String,
     /// New document-viewer LRU cache size.
     pub html_cache_size: u32,
+    /// New watched file extensions (lowercase, no dot), e.g. `["md", "adoc"]` (item 70).
+    pub watched_extensions: Vec<String>,
 }
 
 /// A workspace folder's link status, for the sidebar's per-folder "link" toggle (item 29).
