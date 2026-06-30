@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use looper_ipc::{LinkingConfig, WorkspaceFolderCandidate};
+use looper_ipc::{EditorConfig, LinkingConfig, WorkspaceFolderCandidate};
 use looper_state::{Store, Versioned};
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,10 @@ pub struct Workspace {
     /// workspaces.
     #[serde(default)]
     pub linking: looper_ipc::LinkingConfig,
+    /// Workspace-level markdown editor behavior. `#[serde(default)]` keeps legacy workspaces on
+    /// manual save until the user opts into autosave.
+    #[serde(default)]
+    pub editor_config: EditorConfig,
     /// Watched file extensions (lowercase, no dot) the scan + watcher index — e.g. `["md", "adoc"]`
     /// (item 70). `#[serde(default = "default_watched_extensions")]` supplies the current
     /// document defaults for workspaces written before this field.
@@ -367,6 +371,7 @@ impl WorkspaceStore {
             backend: looper_ipc::KbBackend::default(),
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking,
+            editor_config: EditorConfig::default(),
             watched_extensions: default_watched_extensions(),
             adoc_renderer: default_adoc_renderer(),
             diagram_renderers: default_diagram_renderers(),
@@ -490,6 +495,19 @@ impl WorkspaceStore {
         config: looper_ipc::LinkingConfig,
     ) -> Result<(), WorkspaceError> {
         self.workspace_mut(id)?.linking = config;
+        self.persist()
+    }
+
+    /// Set a workspace's markdown editor behavior.
+    ///
+    /// # Errors
+    /// Returns [`WorkspaceError::NotFound`] for an unknown id, or a persistence error.
+    pub fn set_editor_config(
+        &mut self,
+        id: &WorkspaceId,
+        config: EditorConfig,
+    ) -> Result<(), WorkspaceError> {
+        self.workspace_mut(id)?.editor_config = config;
         self.persist()
     }
 
@@ -867,6 +885,34 @@ mod tests {
             Some("mermaid-js"),
             "diagram_renderers defaults Mermaid to client-side for legacy workspaces (item 72)"
         );
+        assert_eq!(
+            ws.editor_config,
+            EditorConfig::default(),
+            "editor_config defaults to manual-save behavior for legacy workspaces"
+        );
+    }
+
+    #[test]
+    fn editor_config_defaults_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("workspaces.json");
+
+        let mut store = WorkspaceStore::open(&path).unwrap();
+        let id = store.create("Docs", vec![], tmp.path().join("kb")).unwrap();
+        assert_eq!(
+            store.get(&id).unwrap().editor_config,
+            EditorConfig::default()
+        );
+
+        let config = EditorConfig {
+            autosave_on_focus_change: true,
+            autosave_timer_enabled: true,
+            autosave_delay_ms: 5000,
+        };
+        store.set_editor_config(&id, config.clone()).unwrap();
+
+        let reopened = WorkspaceStore::open(&path).unwrap();
+        assert_eq!(reopened.get(&id).unwrap().editor_config, config);
     }
 
     #[test]
@@ -982,6 +1028,7 @@ mod tests {
             backend: looper_ipc::KbBackend::default(),
             enrichment: looper_ipc::EnrichmentConfig::default(),
             linking: looper_ipc::LinkingConfig::default(),
+            editor_config: EditorConfig::default(),
             watched_extensions: default_watched_extensions(),
             adoc_renderer: default_adoc_renderer(),
             diagram_renderers: default_diagram_renderers(),

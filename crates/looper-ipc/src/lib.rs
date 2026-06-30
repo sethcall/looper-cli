@@ -219,6 +219,58 @@ pub enum KbBackend {
     Okf,
 }
 
+/// Workspace-level markdown editor behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct EditorConfig {
+    /// Save the active editor when focus leaves it.
+    pub autosave_on_focus_change: bool,
+    /// Save after the editor has been idle for `autosave_delay_ms`.
+    pub autosave_timer_enabled: bool,
+    /// Idle delay before timer autosave runs, in milliseconds.
+    pub autosave_delay_ms: u32,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            autosave_on_focus_change: false,
+            autosave_timer_enabled: false,
+            autosave_delay_ms: 3000,
+        }
+    }
+}
+
+/// A markdown file the desktop shell should open in an editor tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct EditorOpenRequest {
+    /// Absolute canonical markdown file path.
+    pub file: String,
+    /// Display name for the editor tab.
+    pub name: String,
+}
+
+/// A file-open request that could not become an editor tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct EditorOpenError {
+    /// The original path argument, when available.
+    pub input: String,
+    /// Human-readable failure reason.
+    pub message: String,
+}
+
+/// Queued editor-open work drained by the desktop frontend after startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct PendingEditorOpens {
+    /// Valid files to open or focus.
+    pub requests: Vec<EditorOpenRequest>,
+    /// Invalid file-open attempts to surface to the user.
+    pub errors: Vec<EditorOpenError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../bindings/")]
 pub struct WorkspaceInfo {
@@ -242,6 +294,8 @@ pub struct WorkspaceInfo {
     pub diagram_renderers: BTreeMap<String, String>,
     /// The knowledge-base backend (OKF today; the seam allows others).
     pub backend: KbBackend,
+    /// Workspace-level markdown editor behavior.
+    pub editor_config: EditorConfig,
 }
 
 /// Request payload to create a workspace.
