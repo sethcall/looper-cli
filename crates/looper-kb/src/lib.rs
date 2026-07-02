@@ -137,6 +137,16 @@ pub trait Kb: Send + Sync {
         None
     }
 
+    /// Overwrite the **indexed** artifact for a source document (the editor's split-write target:
+    /// the full doc including producer-owned fenced regions). Returns `Ok(false)` when the doc
+    /// isn't indexed or the backend has no per-doc artifact (the default).
+    ///
+    /// # Errors
+    /// Returns [`KbError`] on I/O or backend failure.
+    fn write_indexed(&self, _source_path: &Path, _content: &str) -> Result<bool, KbError> {
+        Ok(false)
+    }
+
     /// Every indexed document as a lightweight catalog entry (path + title + labels) — the
     /// whole-KB listing callers browse/visualize. Defaults to
     /// empty for backends that don't track it.
@@ -230,6 +240,8 @@ pub struct MockKb {
 struct MockState {
     seq: u64,
     by_source: HashMap<PathBuf, MockEntry>,
+    /// Indexed artifacts written via [`Kb::write_indexed`] (in-memory stand-in for bundle files).
+    indexed: HashMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +254,21 @@ struct MockEntry {
 impl Kb for MockKb {
     fn name(&self) -> &str {
         "mock"
+    }
+
+    fn read_indexed(&self, source_path: &Path) -> Option<String> {
+        lock(&self.inner).indexed.get(source_path).cloned()
+    }
+
+    fn write_indexed(&self, source_path: &Path, content: &str) -> Result<bool, KbError> {
+        let mut state = lock(&self.inner);
+        if !state.by_source.contains_key(source_path) {
+            return Ok(false);
+        }
+        state
+            .indexed
+            .insert(source_path.to_path_buf(), content.to_owned());
+        Ok(true)
     }
 
     fn index(&self, doc: &SourceDoc) -> Result<ConceptRef, KbError> {

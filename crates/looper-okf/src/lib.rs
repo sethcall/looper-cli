@@ -16,6 +16,7 @@
 //! bundle writes, and move-stable `okf_id` via content-hash matching.
 
 mod error;
+pub mod fence;
 mod frontmatter;
 mod viz;
 
@@ -125,6 +126,14 @@ struct IndexEntry {
     /// alongside `title`. `#[serde(default)]` (→ empty) keeps older sidecars loadable.
     #[serde(default)]
     labels: Vec<String>,
+    /// Source-content revision: bumped exactly when the indexed content hash changes (no-op
+    /// re-indexes keep it). `#[serde(default)]` (→ 0 = pre-revision sidecar) keeps older sidecars
+    /// loadable; the next index of such an entry backfills it to 1.
+    #[serde(default)]
+    revision: u64,
+    /// ISO-8601 timestamp of the last content change (when `revision` last bumped).
+    #[serde(default)]
+    updated_at: Option<String>,
 }
 
 impl OkfKb {
@@ -207,9 +216,33 @@ impl OkfKb {
             format!("urn:looper:doc:{}", inner.index.next_seq)
         };
 
-        ensure_okf_frontmatter(&mut document.frontmatter, &okf_id, doc, &document.body);
+        // Content revision + change timestamp (staleness metadata): bump on a content-hash
+        // change, keep on a no-op re-index (rebuilds), backfill pre-revision sidecars to 1.
+        let (revision, updated_at) = match inner.index.entries.get(&doc.source_path) {
+            Some(entry) if entry.content_hash == content_hash && entry.revision > 0 => (
+                entry.revision,
+                entry.updated_at.clone().unwrap_or_else(utc_now_iso),
+            ),
+            Some(entry) => (entry.revision + 1, utc_now_iso()),
+            None => (1, utc_now_iso()),
+        };
 
-        write_bundle(&self.concept_path(&doc.concept_id), &document)?;
+        ensure_okf_frontmatter(
+            &mut document.frontmatter,
+            &okf_id,
+            doc,
+            &document.body,
+            revision,
+            &updated_at,
+        );
+
+        // Two authors, one output: regeneration replaces the bundle from source, so any
+        // producer-owned fenced regions (and the frontmatter they added) in the PREVIOUS bundle
+        // are carried forward mechanically — enrichment survives source edits with no re-derivation.
+        let concept_path = self.concept_path(&doc.concept_id);
+        carry_over_preserved(&mut document, &concept_path);
+
+        write_bundle(&concept_path, &document)?;
 
         let title = frontmatter_str(&document.frontmatter, "title")
             .unwrap_or_else(|| looper_kb::derive_title(&document.body, &doc.concept_id));
@@ -236,6 +269,8 @@ impl OkfKb {
                 content_hash,
                 title: Some(title.clone()),
                 labels: labels.clone(),
+                revision,
+                updated_at: Some(updated_at),
             },
         );
         inner.search.insert(
@@ -439,6 +474,23 @@ impl Kb for OkfKb {
         std::fs::read_to_string(self.concept_path(&concept_id)).ok()
     }
 
+    fn write_indexed(&self, source_path: &Path, content: &str) -> Result<bool, KbError> {
+        let Some(concept_id) = lock(&self.inner)
+            .index
+            .entries
+            .get(source_path)
+            .map(|entry| entry.concept_id.clone())
+        else {
+            return Ok(false);
+        };
+        let path = self.concept_path(&concept_id);
+        std::fs::write(&path, content)
+            .map_err(|source| into_kb_error(OkfError::Io { path, source }))?;
+        // Keep the catalog (title/labels/search) in step with the rewritten bundle.
+        let _ = self.refresh_indexed_impl(source_path);
+        Ok(true)
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, KbError> {
         self.search_impl(query, limit).map_err(into_kb_error)
     }
@@ -477,7 +529,14 @@ impl KbProvider for OkfProvider {
     }
 }
 
-fn ensure_okf_frontmatter(fm: &mut Mapping, okf_id: &str, doc: &SourceDoc, body: &str) {
+fn ensure_okf_frontmatter(
+    fm: &mut Mapping,
+    okf_id: &str,
+    doc: &SourceDoc,
+    body: &str,
+    revision: u64,
+    updated_at: &str,
+) {
     // Required by OKF.
     if fm.get("type").is_none() {
         fm.insert(Value::from("type"), Value::from("Document"));
@@ -497,6 +556,72 @@ fn ensure_okf_frontmatter(fm: &mut Mapping, okf_id: &str, doc: &SourceDoc, body:
         Value::from("source_path"),
         Value::from(doc.source_path.to_string_lossy().into_owned()),
     );
+    // Staleness metadata (index-only; never written to source files): the source-content
+    // revision and when it last changed. Enrichment pins its fence to `okf_revision` via a
+    // `from-revision` attribute, so revision mismatch = stale enrichment.
+    fm.insert(Value::from("okf_revision"), Value::from(revision));
+    fm.insert(Value::from("okf_updated_at"), Value::from(updated_at));
+}
+
+/// Now as an ISO-8601 UTC string, dependency-free (Howard Hinnant's `civil_from_days`).
+fn utc_now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    format_unix_utc(i64::try_from(secs).unwrap_or(0))
+}
+
+fn format_unix_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00")
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1); // [1, 31]
+    let month = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1); // [1, 12]
+    (year + i64::from(month <= 2), month, day)
+}
+
+/// Carry producer-owned content forward from the previous bundle at `previous_bundle` into a
+/// regenerated `document`: preserved fenced regions (see [`fence::PRESERVED_CLASSES`]) are appended
+/// to the body in their original order, and frontmatter keys the regenerated doc lacks are restored.
+/// If the regenerated source body itself contains a preserved region, the source is authoritative
+/// and nothing is carried over (no duplicates; an author-deleted region stays deleted). Carried
+/// regions are appended at the end — mid-doc placement is not re-anchored (v1).
+fn carry_over_preserved(document: &mut Document, previous_bundle: &Path) {
+    let Ok(previous) = std::fs::read_to_string(previous_bundle) else {
+        return;
+    };
+    let prev = Document::parse(&previous);
+    let regions = fence::preserved_regions(&prev.body);
+    if regions.is_empty() || fence::has_preserved(&document.body) {
+        return;
+    }
+    let mut body = document.body.trim_end().to_owned();
+    for region in &regions {
+        body.push_str("\n\n");
+        body.push_str(prev.body[region.start..region.end].trim_end());
+    }
+    body.push('\n');
+    document.body = body;
+    // Restore keys only the previous bundle has (enrichment-added `description`, `gemini_*`, …).
+    // Keys the source (or the producer refresh) defines keep the regenerated value; a key at whole-
+    // key granularity that the source deleted but enrichment had added comes back with the region.
+    for (key, value) in &prev.frontmatter {
+        if document.frontmatter.get(key).is_none() {
+            document.frontmatter.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 fn write_bundle(path: &Path, document: &Document) -> Result<(), OkfError> {
@@ -621,6 +746,153 @@ mod tests {
             concept_id: concept.to_string(),
             content: content.to_string(),
         }
+    }
+
+    /// Simulate an enricher: append a preserved fence + enrichment frontmatter to the bundle,
+    /// exactly as `looper-okf-enricher` writes it (the desktop repo's concrete producer).
+    fn enrich_bundle(kb: &OkfKb, source: &Path) {
+        let bundle = kb.read_indexed(source).unwrap();
+        let mut document = Document::parse(&bundle);
+        document
+            .frontmatter
+            .insert(Value::from("gemini_enriched_at"), Value::from("t"));
+        document
+            .frontmatter
+            .insert(Value::from("description"), Value::from("AI summary."));
+        document.body = format!(
+            "{}\n\n::: {{.enrichment gemini-model=\"m\" enriched-at=\"t\" from-revision=\"1\"}}\n# AI Enrichment\n\n- a point\n\n:::\n",
+            document.body.trim_end()
+        );
+        assert!(kb
+            .write_indexed(source, &document.to_markdown().unwrap())
+            .unwrap());
+    }
+
+    #[test]
+    fn revision_bumps_on_content_change_and_holds_on_noop_reindex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src_path = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        kb.index(&doc(&src_path, "docs/a.md", "# A\n\nv1\n"))
+            .unwrap();
+        let first = kb.read_indexed(&src_path).unwrap();
+        assert!(first.contains("okf_revision: 1"));
+        assert!(first.contains("okf_updated_at: "));
+
+        // No-op re-index (a rebuild): revision and timestamp are unchanged.
+        kb.index(&doc(&src_path, "docs/a.md", "# A\n\nv1\n"))
+            .unwrap();
+        assert_eq!(kb.read_indexed(&src_path).unwrap(), first);
+
+        // Content change: revision bumps.
+        kb.index(&doc(&src_path, "docs/a.md", "# A\n\nv2\n"))
+            .unwrap();
+        assert!(kb
+            .read_indexed(&src_path)
+            .unwrap()
+            .contains("okf_revision: 2"));
+    }
+
+    #[test]
+    fn reindex_carries_enrichment_fence_and_frontmatter_forward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        kb.index(&doc(&src, "docs/a.md", "# A\n\noriginal body\n"))
+            .unwrap();
+        enrich_bundle(&kb, &src);
+
+        // The source changes (any editor) → re-index regenerates the bundle…
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nEDITED body\n"))
+            .unwrap();
+        let out = kb.read_indexed(&src).unwrap();
+
+        // …and the enrichment fence + enrichment-only frontmatter survive, no re-derivation.
+        assert!(out.contains("EDITED body"));
+        assert!(out.contains("::: {.enrichment gemini-model=\"m\""));
+        assert!(out.contains("- a point"));
+        assert!(out.contains("gemini_enriched_at: t"));
+        assert!(out.contains("description: AI summary."));
+        assert_eq!(out.matches("::: {.enrichment").count(), 1);
+        // The staleness signal: the source edit bumped the doc revision while the carried fence
+        // still pins the revision it was derived from — detectably stale, no API call spent.
+        assert!(out.contains("okf_revision: 2"));
+        assert!(out.contains("from-revision=\"1\""));
+    }
+
+    #[test]
+    fn source_authored_preserved_fence_wins_over_carry_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nbody\n")).unwrap();
+        enrich_bundle(&kb, &src);
+
+        let authored = "# A\n\n::: {.enrichment}\nauthor took ownership\n:::\n";
+        kb.index(&doc(&src, "docs/a.md", authored)).unwrap();
+        let out = kb.read_indexed(&src).unwrap();
+        assert!(out.contains("author took ownership"));
+        assert_eq!(out.matches("::: {.enrichment").count(), 1);
+        assert!(!out.contains("- a point"));
+    }
+
+    #[test]
+    fn source_frontmatter_wins_over_restored_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nbody\n")).unwrap();
+        enrich_bundle(&kb, &src);
+
+        // The author adds their own description — it must beat the enrichment-added one.
+        kb.index(&doc(
+            &src,
+            "docs/a.md",
+            "---\ndescription: Author's own.\n---\n# A\n\nbody v2\n",
+        ))
+        .unwrap();
+        let out = kb.read_indexed(&src).unwrap();
+        assert!(out.contains("description: Author's own."));
+        assert!(!out.contains("AI summary."));
+        assert!(out.contains("gemini_enriched_at: t"));
+    }
+
+    #[test]
+    fn unenriched_docs_reindex_exactly_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nv1\n")).unwrap();
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nv2\n")).unwrap();
+        let out = kb.read_indexed(&src).unwrap();
+        assert!(out.contains("v2") && !out.contains("v1"));
+        assert!(!out.contains(":::"));
+    }
+
+    #[test]
+    fn write_indexed_requires_an_indexed_doc_and_refreshes_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bundle, index) = (tmp.path().join("b"), tmp.path().join("i.json"));
+        let src = tmp.path().join("docs/a.md");
+        let kb = OkfKb::open(&bundle, &index).unwrap();
+
+        assert!(!kb.write_indexed(&src, "x").unwrap());
+        kb.index(&doc(&src, "docs/a.md", "# A\n\nbody\n")).unwrap();
+        assert!(kb
+            .write_indexed(&src, "---\ntitle: A\ntags:\n- fresh\n---\n# A\n\nbody\n")
+            .unwrap());
+        let labels: Vec<String> = kb.tag_counts().into_iter().map(|t| t.tag).collect();
+        assert!(labels.contains(&"fresh".to_string()));
     }
 
     #[test]

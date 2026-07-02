@@ -477,6 +477,28 @@ impl Engine {
             .and_then(|handle| handle.kb.read_indexed(source_path))
     }
 
+    /// Overwrite the indexed (bundle) markdown for a source document in an open workspace — the
+    /// editor's split-write target (full doc including producer-owned fenced regions). Returns
+    /// `false` when the workspace isn't open or the doc isn't indexed; the caller falls back to a
+    /// plain source save. The catalog (title/labels) is refreshed by the backend.
+    ///
+    /// # Errors
+    /// Returns the backend's [`looper_kb::KbError`] on I/O failure.
+    pub fn write_indexed_document(
+        &self,
+        workspace_id: &str,
+        source_path: &Path,
+        content: &str,
+    ) -> Result<bool, looper_kb::KbError> {
+        let Some(kb) = lock(&self.inner.workspaces)
+            .get(workspace_id)
+            .map(|handle| Arc::clone(&handle.kb))
+        else {
+            return Ok(false);
+        };
+        kb.write_indexed(source_path, content)
+    }
+
     /// Request a force re-scan of an open workspace: the worker reconciles the index with the tree
     /// on its next poll (≤250 ms) — indexing new/changed docs and **evicting missing or
     /// now-ignored** ones (item 47). No-op if the workspace isn't open.
